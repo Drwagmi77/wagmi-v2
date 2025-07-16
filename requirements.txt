@@ -1,6 +1,6 @@
-python-telegram-bot==20.6
-sqlalchemy==2.0.30
-psycopg2-binary==2.9.9
-solders==0.26.0
-solana==0.29.0
-python-dotenv==1.0.1
+python-telegram-bot
+sqlalchemy
+psycopg2-binary
+solders
+solana
+python-dotenv
