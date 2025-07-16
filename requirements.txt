@@ -1,6 +1,5 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 sqlalchemy
 psycopg2-binary
-solders
-solana
 python-dotenv
+solana
