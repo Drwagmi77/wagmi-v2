@@ -2,13 +2,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from solana.rpc.api import Client
-from solana.publickey import PublicKey
+from solana.rpc.async_api import AsyncClient  # AsyncClient kullanıyoruz
+from solders.pubkey import Pubkey  # PublicKey yerine Pubkey
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
 from flask import Flask, request
+import asyncio
 
 # Flask uygulaması oluştur
 app = Flask(__name__)
@@ -39,8 +40,8 @@ engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# Solana istemcisi
-solana_client = Client(SOLANA_RPC)
+# Solana async istemcisi
+solana_client = AsyncClient(SOLANA_RPC)
 application = Application.builder().token(BOT_TOKEN).build()
 
 # Üyelik planları
@@ -132,32 +133,32 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            sol_wallet_pk = PublicKey(SOLANA_WALLET_ADDRESS)
-            user_wallet_pk = PublicKey(wallet_address)
+            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)  # PublicKey yerine Pubkey
+            user_wallet_pk = Pubkey.from_string(wallet_address)
 
-            sig_response = solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
-            signatures = [sig["signature"] for sig in sig_response["result"]]
+            sig_response = await solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
+            signatures = [sig.signature for sig in sig_response.value]
 
             found_membership_type = None
 
             for sig in signatures:
-                tx_resp = solana_client.get_transaction(sig)
-                if not tx_resp.get("result"):
+                tx_resp = await solana_client.get_transaction(sig)
+                if not tx_resp.value:
                     continue
 
-                tx = tx_resp["result"]["transaction"]["message"]
-                meta = tx_resp["result"]["meta"]
-                accounts = tx["accountKeys"]
+                tx = tx_resp.value.transaction
+                meta = tx_resp.value.meta
+                accounts = tx.message.account_keys
 
-                if wallet_address not in accounts:
+                if user_wallet_pk not in accounts:
                     continue
 
-                pre_balances = meta["preBalances"]
-                post_balances = meta["postBalances"]
+                pre_balances = meta.pre_balances
+                post_balances = meta.post_balances
 
                 try:
-                    sender_index = accounts.index(wallet_address)
-                    receiver_index = accounts.index(SOLANA_WALLET_ADDRESS)
+                    sender_index = accounts.index(user_wallet_pk)
+                    receiver_index = accounts.index(sol_wallet_pk)
                     lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
 
                     for mem_type, mem_info in memberships.items():
@@ -225,7 +226,7 @@ application.job_queue.run_repeating(remove_expired_members, interval=86400)
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(), application.bot)
-    application.process_update(update)
+    asyncio.run(application.process_update(update))
     return "OK"
 
 # Render uyumlu başlatma
