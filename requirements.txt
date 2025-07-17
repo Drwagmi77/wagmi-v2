@@ -1,5 +1,5 @@
 python-telegram-bot==20.8
-solana==0.34.0
+solana-py==0.34.0  # DİKKAT: 'solana' yerine 'solana-py' kullanıyoruz
 httpx==0.26.0
 sqlalchemy==2.0.25
 python-dotenv==1.0.0
