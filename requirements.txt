@@ -1,6 +1,6 @@
+python-telegram-bot==20.8
+solana==0.27.0
+httpx==0.23.0
 Flask
 python-dotenv
 sqlalchemy
-python-telegram-bot==20.8
-solana==0.30.0
-httpx==0.26.0
