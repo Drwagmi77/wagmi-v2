@@ -3,3 +3,4 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 solana==0.26.0
+python-telegram-bot==20.3
