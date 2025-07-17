@@ -2,12 +2,16 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from solana.rpc.api import Client
-from solana.publickey import PublicKey
+from solders.rpc.api import RpcClient
+from solders.pubkey import Pubkey
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
+from flask import Flask, request
+
+# Flask uygulaması oluştur
+app = Flask(__name__)
 
 # Environment variables
 load_dotenv()
@@ -35,8 +39,8 @@ engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# Bot ve Solana istemcisi
-solana_client = Client(SOLANA_RPC)
+# Bot ve Solana istemcisi (solders kullanıyoruz)
+solana_client = RpcClient(SOLANA_RPC)
 application = Application.builder().token(BOT_TOKEN).build()
 
 # Üyelik planları
@@ -128,44 +132,42 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            sol_wallet_pk = PublicKey(SOLANA_WALLET_ADDRESS)
-            user_wallet_pk = PublicKey(wallet_address)
+            # Solders kullanarak işlem kontrolü
+            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)
+            user_wallet_pk = Pubkey.from_string(wallet_address)
 
-            signatures_resp = solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
-            if not signatures_resp.get("result"):
-                await update.message.reply_text("Could not fetch transactions from Solana network. Try again later.")
-                return
+            sig_response = solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
+            signatures = [str(sig.signature) for sig in sig_response.value]
 
-            signatures = signatures_resp["result"]
             found_membership_type = None
 
             for sig in signatures:
-                signature = sig["signature"]
-                tx_resp = solana_client.get_transaction(signature)
-                tx = tx_resp.get("result")
-                if not tx:
+                tx_resp = solana_client.get_transaction(sig)
+                if not tx_resp.value:
                     continue
 
-                accounts = tx["transaction"]["message"]["accountKeys"]
+                tx = tx_resp.value.transaction
+                accounts = [str(acc.pubkey) for acc in tx.message.account_keys]
+
                 if wallet_address not in accounts:
                     continue
 
-                pre_balances = tx["meta"]["preBalances"]
-                post_balances = tx["meta"]["postBalances"]
+                pre_balances = tx.meta.pre_balances
+                post_balances = tx.meta.post_balances
 
                 try:
                     sender_index = accounts.index(wallet_address)
                     receiver_index = accounts.index(SOLANA_WALLET_ADDRESS)
+                    lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
+
+                    for mem_type, mem_info in memberships.items():
+                        expected_lamports = int(mem_info["amount"] * 1_000_000_000)
+                        if math.isclose(lamports_sent, expected_lamports, abs_tol=LAMBERT_TOLERANCE):
+                            found_membership_type = mem_type
+                            break
+
                 except ValueError:
                     continue
-
-                lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
-
-                for mem_type, mem_info in memberships.items():
-                    expected_lamports = int(mem_info["amount"] * 1_000_000_000)
-                    if math.isclose(lamports_sent, expected_lamports, abs_tol=LAMBERT_TOLERANCE):
-                        found_membership_type = mem_type
-                        break
 
                 if found_membership_type:
                     expiry_date = datetime.utcnow() + timedelta(seconds=memberships[found_membership_type]["duration"])
@@ -219,6 +221,22 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_w
 application.add_error_handler(error_handler)
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Sadece polling ile çalış
+# Webhook endpoint
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(), application.bot)
+    application.process_update(update)
+    return "OK"
+
+# Render uyumlu başlatma
 if __name__ == '__main__':
-    application.run_polling()
+    if 'RENDER' in os.environ:
+        PORT = int(os.environ.get('PORT', 10000))
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=PORT,
+            webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook",
+            secret_token=os.environ.get('WEBHOOK_SECRET', 'RENDER_SECRET_123')
+        )
+    else:
+        application.run_polling()
