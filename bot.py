@@ -3,6 +3,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from solana.rpc.api import Client
+from solana.publickey import PublicKey  # Burada PublicKey importu önemli
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -30,29 +31,23 @@ class TempVerification(Base):
     user_id = Column(BigInteger, primary_key=True)
     wallet_address = Column(String)
 
-# Ensure tables are created
 engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# Solana client
 solana_client = Client(SOLANA_RPC)
 
-# Membership configuration
 memberships = {
-    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},  # 3 days
-    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},  # 1 week
-    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},  # 1 month
-    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}  # 6 months
+    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},
+    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},
+    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},
+    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}
 }
 
-# Tolerance for lamports comparison (1 SOL = 1_000_000_000 lamports)
-LAMBERT_TOLERANCE = 5000  # small tolerance to handle minor discrepancies
+LAMBERT_TOLERANCE = 5000
 
-# Create bot application
 application = Application.builder().token(BOT_TOKEN).build()
 
-# START command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("New Membership", callback_data='new_membership')],
@@ -64,7 +59,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# Handle button interactions
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -86,7 +80,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 membership_type = query.data
                 amount = memberships[membership_type]["amount"]
 
-                # Update or add TempVerification with 'pending'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "pending"
@@ -94,7 +87,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     session.add(TempVerification(user_id=user_id, wallet_address="pending"))
                 session.commit()
 
-                # Send payment instructions
                 payment_message = (
                     f"Please send **{amount} SOL** to this address:\n\n`{SOLANA_WALLET_ADDRESS}`\n\n"
                     "After sending, click the button below to enter your wallet address."
@@ -106,7 +98,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif query.data.startswith("enter_wallet_"):
                 membership_type = query.data.split("enter_wallet_")[1]
 
-                # Update or add TempVerification with 'awaiting'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "awaiting"
@@ -119,7 +110,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"Error: {str(e)}. Please try again or contact support.")
             session.rollback()
 
-# Handle wallet address input and verify payment
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -136,7 +126,11 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            signatures_resp = solana_client.get_signatures_for_address(SOLANA_WALLET_ADDRESS, limit=20)
+            # Convert addresses to PublicKey objects (burada hata önleniyor)
+            sol_wallet_pk = PublicKey(SOLANA_WALLET_ADDRESS)
+            user_wallet_pk = PublicKey(wallet_address)
+
+            signatures_resp = solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
             if not signatures_resp.get("result"):
                 await update.message.reply_text("Could not fetch transactions from Solana network. Try again later.")
                 return
@@ -197,7 +191,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
             session.rollback()
 
-# Remove expired members daily
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     with Session() as session:
         try:
@@ -215,18 +208,16 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
             session.rollback()
             print(f"Error in remove_expired_members: {e}")
 
-# Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Update {update} caused error {context.error}")
 
-# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
 
-# Periodic job every 24 hours
+# Run remove_expired_members daily
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Run bot with polling (ensure only one instance)
-application.run_polling(allowed_updates=[])  # Clear update queue to avoid conflicts
+# Run bot with polling and clear update queue to prevent conflicts
+application.run_polling(allowed_updates=None)
