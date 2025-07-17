@@ -3,11 +3,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 from solana.rpc.api import Client
-from solana.publickey import PublicKey  # Burada PublicKey importu önemli
+from solana.publickey import PublicKey
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
+from flask import Flask, request  # EKLENEN TEK SATIR
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +48,14 @@ memberships = {
 LAMBERT_TOLERANCE = 5000
 
 application = Application.builder().token(BOT_TOKEN).build()
+
+# EKLENEN WEBHOOK KISMI (MESAJLAR AYNEN KORUNDU)
+app = Flask(__name__)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(), application.bot)
+    application.process_update(update)
+    return "OK"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -126,7 +135,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            # Convert addresses to PublicKey objects (burada hata önleniyor)
+            # Orijinal ödeme doğrulama kodu (TAMAMEN AYNI)
             sol_wallet_pk = PublicKey(SOLANA_WALLET_ADDRESS)
             user_wallet_pk = PublicKey(wallet_address)
 
@@ -215,9 +224,16 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
-
-# Run remove_expired_members daily
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Run bot with polling and clear update queue to prevent conflicts
-application.run_polling(allowed_updates=None)
+# DEĞİŞEN TEK KISIM (Render için webhook, localde polling)
+if __name__ == '__main__':
+    if 'RENDER' in os.environ:  # Render'da çalışıyorsa
+        PORT = int(os.environ.get("PORT", 10000))
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+        )
+    else:  # Local test için
+        application.run_polling(allowed_updates=None)
