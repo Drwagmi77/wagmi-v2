@@ -1,9 +1,17 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    JobQueue
+)
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from solana.rpc.async_api import AsyncClient  # AsyncClient kullanıyoruz
-from solders.pubkey import Pubkey  # PublicKey yerine Pubkey
+from solana.rpc.async_api import AsyncClient
+from solders.pubkey import Pubkey
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -42,7 +50,9 @@ Session = sessionmaker(bind=engine)
 
 # Solana async istemcisi
 solana_client = AsyncClient(SOLANA_RPC)
-application = Application.builder().token(BOT_TOKEN).build()
+
+# Application ve JobQueue oluştur
+application = Application.builder().token(BOT_TOKEN).job_queue(JobQueue()).build()
 
 # Üyelik planları
 memberships = {
@@ -133,7 +143,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)  # PublicKey yerine Pubkey
+            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)
             user_wallet_pk = Pubkey.from_string(wallet_address)
 
             sig_response = await solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
