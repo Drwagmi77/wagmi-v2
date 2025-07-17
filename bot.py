@@ -1,31 +1,17 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-    JobQueue
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from solana.rpc.async_api import AsyncClient
-from solders.pubkey import Pubkey
+from solana.rpc.api import Client
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
-from flask import Flask, request
-import asyncio
 
-# Flask uygulaması oluştur
-app = Flask(__name__)
-
-# Environment variables
+# Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql://")
+DATABASE_URL = os.getenv("DATABASE_URL")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 SOLANA_WALLET_ADDRESS = os.getenv("SOLANA_WALLET_ADDRESS")
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
@@ -44,27 +30,29 @@ class TempVerification(Base):
     user_id = Column(BigInteger, primary_key=True)
     wallet_address = Column(String)
 
+# Ensure tables are created
 engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# Solana async istemcisi
-solana_client = AsyncClient(SOLANA_RPC)
+# Solana client
+solana_client = Client(SOLANA_RPC)
 
-# Application ve JobQueue oluştur
-application = Application.builder().token(BOT_TOKEN).job_queue(JobQueue()).build()
-
-# Üyelik planları
+# Membership configuration
 memberships = {
-    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},
-    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},
-    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},
-    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}
+    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},  # 3 days
+    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},  # 1 week
+    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},  # 1 month
+    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}  # 6 months
 }
 
-LAMBERT_TOLERANCE = 5000
+# Tolerance for lamports comparison (1 SOL = 1_000_000_000 lamports)
+LAMBERT_TOLERANCE = 5000  # small tolerance to handle minor discrepancies
 
-# Handlers
+# Create bot application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# START command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("New Membership", callback_data='new_membership')],
@@ -76,6 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# Handle button interactions
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -97,6 +86,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 membership_type = query.data
                 amount = memberships[membership_type]["amount"]
 
+                # Update or add TempVerification with 'pending'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "pending"
@@ -104,6 +94,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     session.add(TempVerification(user_id=user_id, wallet_address="pending"))
                 session.commit()
 
+                # Send payment instructions
                 payment_message = (
                     f"Please send **{amount} SOL** to this address:\n\n`{SOLANA_WALLET_ADDRESS}`\n\n"
                     "After sending, click the button below to enter your wallet address."
@@ -115,6 +106,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif query.data.startswith("enter_wallet_"):
                 membership_type = query.data.split("enter_wallet_")[1]
 
+                # Update or add TempVerification with 'awaiting'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "awaiting"
@@ -127,6 +119,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"Error: {str(e)}. Please try again or contact support.")
             session.rollback()
 
+# Handle wallet address input and verify payment
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -143,42 +136,41 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)
-            user_wallet_pk = Pubkey.from_string(wallet_address)
+            signatures_resp = solana_client.get_signatures_for_address(SOLANA_WALLET_ADDRESS, limit=20)
+            if not signatures_resp.get("result"):
+                await update.message.reply_text("Could not fetch transactions from Solana network. Try again later.")
+                return
 
-            sig_response = await solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
-            signatures = [sig.signature for sig in sig_response.value]
-
+            signatures = signatures_resp["result"]
             found_membership_type = None
 
             for sig in signatures:
-                tx_resp = await solana_client.get_transaction(sig)
-                if not tx_resp.value:
+                signature = sig["signature"]
+                tx_resp = solana_client.get_transaction(signature)
+                tx = tx_resp.get("result")
+                if not tx:
                     continue
 
-                tx = tx_resp.value.transaction
-                meta = tx_resp.value.meta
-                accounts = tx.message.account_keys
-
-                if user_wallet_pk not in accounts:
+                accounts = tx["transaction"]["message"]["accountKeys"]
+                if wallet_address not in accounts:
                     continue
 
-                pre_balances = meta.pre_balances
-                post_balances = meta.post_balances
+                pre_balances = tx["meta"]["preBalances"]
+                post_balances = tx["meta"]["postBalances"]
 
                 try:
-                    sender_index = accounts.index(user_wallet_pk)
-                    receiver_index = accounts.index(sol_wallet_pk)
-                    lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
-
-                    for mem_type, mem_info in memberships.items():
-                        expected_lamports = int(mem_info["amount"] * 1_000_000_000)
-                        if math.isclose(lamports_sent, expected_lamports, abs_tol=LAMBERT_TOLERANCE):
-                            found_membership_type = mem_type
-                            break
-
+                    sender_index = accounts.index(wallet_address)
+                    receiver_index = accounts.index(SOLANA_WALLET_ADDRESS)
                 except ValueError:
                     continue
+
+                lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
+
+                for mem_type, mem_info in memberships.items():
+                    expected_lamports = int(mem_info["amount"] * 1_000_000_000)
+                    if math.isclose(lamports_sent, expected_lamports, abs_tol=LAMBERT_TOLERANCE):
+                        found_membership_type = mem_type
+                        break
 
                 if found_membership_type:
                     expiry_date = datetime.utcnow() + timedelta(seconds=memberships[found_membership_type]["duration"])
@@ -205,6 +197,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
             session.rollback()
 
+# Remove expired members daily
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     with Session() as session:
         try:
@@ -222,34 +215,18 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
             session.rollback()
             print(f"Error in remove_expired_members: {e}")
 
+# Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Update {update} caused error {context.error}")
 
-# Handlers ekle
+# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
+
+# Periodic job every 24 hours
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Webhook endpoint
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(), application.bot)
-    asyncio.run(application.process_update(update))
-    return "OK"
-
-# Son satırları şu şekilde güncelle:
-if __name__ == '__main__':
-    if 'RENDER' in os.environ:
-        PORT = int(os.environ.get('PORT', 10000))
-        WEBHOOK_URL = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
-        print(f"Webhook URL: {WEBHOOK_URL}")  # Log kontrolü
-        application.run_webhook(
-            listen='0.0.0.0',
-            port=PORT,
-            webhook_url=WEBHOOK_URL,
-            secret_token=os.environ.get('WEBHOOK_SECRET', 'default_secret')
-        )
-    else:
-        application.run_polling()
+# Run bot with polling (ensure only one instance)
+application.run_polling(allowed_updates=[])  # Clear update queue to avoid conflicts
