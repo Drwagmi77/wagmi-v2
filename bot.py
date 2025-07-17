@@ -96,9 +96,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Please enter the Solana wallet address you used for payment:")
         session.merge(TempVerification(user_id=user_id, wallet_address="awaiting"))
         session.commit()
+        session.close()
 
 # Handle wallet address input (automatic verification)
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return  # Ignore if no message or text
+
     user_id = update.message.from_user.id
     wallet_address = update.message.text.strip()
     session = Session()
