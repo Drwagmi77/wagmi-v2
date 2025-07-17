@@ -1,5 +1,5 @@
 python-telegram-bot[webhooks]==20.3
-solana-py==0.31.0  # Resmi solana paketi yerine alternatif
+solders==0.18.0  # Solana için alternatif paket
 flask==3.0.2
 sqlalchemy==2.0.25
 python-dotenv==1.0.0
