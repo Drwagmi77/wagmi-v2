@@ -4,3 +4,4 @@ psycopg2-binary
 python-dotenv
 solana==0.26.0
 httpx==0.23.3
+flask==3.0.2
