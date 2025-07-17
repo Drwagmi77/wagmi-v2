@@ -1,5 +1,5 @@
-python-telegram-bot==20.8
 Flask
 python-dotenv
 sqlalchemy
-solana==0.27.0
+python-telegram-bot==13.7  
+solana==0.30.0            
