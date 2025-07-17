@@ -1,5 +1,5 @@
-python-telegram-bot[webhooks]==20.3
-solders==0.18.0
-flask==3.0.2
-sqlalchemy==2.0.25
-python-dotenv==1.0.0
+python-telegram-bot==20.8
+Flask
+python-dotenv
+sqlalchemy
+solana
