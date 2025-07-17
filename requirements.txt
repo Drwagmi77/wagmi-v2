@@ -1,6 +1,6 @@
-python-telegram-bot==20.8
-solana==0.36.7  # en son kararlı sürüm
-solders==0.23.0  # yeni sürüm
+python-telegram-bot[job-queue]==20.8
+solana==0.36.7
+solders==0.23.0
 httpx==0.26.0
 sqlalchemy==2.0.25
 python-dotenv==1.0.0
