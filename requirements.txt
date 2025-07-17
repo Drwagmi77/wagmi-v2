@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]==20.3
+python-telegram-bot==20.3
 flask==3.0.2
 sqlalchemy==2.0.25
 solana==0.29.0
