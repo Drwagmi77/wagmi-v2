@@ -2,8 +2,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from solders.rpc.api import RpcClient
-from solders.pubkey import Pubkey
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
@@ -39,8 +39,8 @@ engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# Bot ve Solana istemcisi (solders kullanıyoruz)
-solana_client = RpcClient(SOLANA_RPC)
+# Solana istemcisi
+solana_client = Client(SOLANA_RPC)
 application = Application.builder().token(BOT_TOKEN).build()
 
 # Üyelik planları
@@ -132,28 +132,28 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text("Verifying your payment. Please wait...")
 
-            # Solders kullanarak işlem kontrolü
-            sol_wallet_pk = Pubkey.from_string(SOLANA_WALLET_ADDRESS)
-            user_wallet_pk = Pubkey.from_string(wallet_address)
+            sol_wallet_pk = PublicKey(SOLANA_WALLET_ADDRESS)
+            user_wallet_pk = PublicKey(wallet_address)
 
             sig_response = solana_client.get_signatures_for_address(sol_wallet_pk, limit=20)
-            signatures = [str(sig.signature) for sig in sig_response.value]
+            signatures = [sig["signature"] for sig in sig_response["result"]]
 
             found_membership_type = None
 
             for sig in signatures:
                 tx_resp = solana_client.get_transaction(sig)
-                if not tx_resp.value:
+                if not tx_resp.get("result"):
                     continue
 
-                tx = tx_resp.value.transaction
-                accounts = [str(acc.pubkey) for acc in tx.message.account_keys]
+                tx = tx_resp["result"]["transaction"]["message"]
+                meta = tx_resp["result"]["meta"]
+                accounts = tx["accountKeys"]
 
                 if wallet_address not in accounts:
                     continue
 
-                pre_balances = tx.meta.pre_balances
-                post_balances = tx.meta.post_balances
+                pre_balances = meta["preBalances"]
+                post_balances = meta["postBalances"]
 
                 try:
                     sender_index = accounts.index(wallet_address)
