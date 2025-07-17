@@ -8,10 +8,6 @@ from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
-from flask import Flask, request
-
-# Flask uygulaması oluştur
-app = Flask(__name__)
 
 # Environment variables
 load_dotenv()
@@ -223,23 +219,6 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_w
 application.add_error_handler(error_handler)
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Webhook endpoint
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(), application.bot)
-    application.process_update(update)
-    return "OK"
-
-# Render uyumlu başlatma
+# Sadece polling ile çalış
 if __name__ == '__main__':
-    if 'RENDER' in os.environ:
-        PORT = int(os.environ.get('PORT', 10000))
-        app.run(host='0.0.0.0', port=PORT)
-        application.run_webhook(
-            listen='0.0.0.0',
-            port=PORT,
-            webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook",
-            secret_token=os.environ.get('WEBHOOK_SECRET', 'DEFAULT_SECRET_123')
-        )
-    else:
-        application.run_polling()
+    application.run_polling()
