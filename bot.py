@@ -239,15 +239,17 @@ def webhook():
     asyncio.run(application.process_update(update))
     return "OK"
 
-# Render uyumlu başlatma
+# Son satırları şu şekilde güncelle:
 if __name__ == '__main__':
     if 'RENDER' in os.environ:
         PORT = int(os.environ.get('PORT', 10000))
+        WEBHOOK_URL = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
+        print(f"Webhook URL: {WEBHOOK_URL}")  # Log kontrolü
         application.run_webhook(
             listen='0.0.0.0',
             port=PORT,
-            webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook",
-            secret_token=os.environ.get('WEBHOOK_SECRET', 'RENDER_SECRET_123')
+            webhook_url=WEBHOOK_URL,
+            secret_token=os.environ.get('WEBHOOK_SECRET', 'default_secret')
         )
     else:
         application.run_polling()
