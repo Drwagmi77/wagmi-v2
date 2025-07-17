@@ -1,6 +1,5 @@
 python-telegram-bot==20.3
+solana==0.31.0  # httpx 0.24+ destekleyen versiyon
 flask==3.0.2
 sqlalchemy==2.0.25
-solana==0.29.0
 python-dotenv==1.0.0
-httpx==0.23.0  # Çakışmayı önlemek için sabit versiyon
