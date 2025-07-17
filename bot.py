@@ -8,20 +8,20 @@ from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
 import math
-from flask import Flask, request  # Flask eklendi
+from flask import Flask, request
 
-# --- Flask Uygulaması ---
+# Flask uygulaması oluştur
 app = Flask(__name__)
 
-# --- Environment Variables ---
+# Environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql://")  # Render için düzeltme
+DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql://")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
 SOLANA_WALLET_ADDRESS = os.getenv("SOLANA_WALLET_ADDRESS")
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 
-# --- Veritabanı Ayarları (Aynen Korundu) ---
+# Database setup
 Base = declarative_base()
 
 class Membership(Base):
@@ -39,10 +39,11 @@ engine = create_engine(DATABASE_URL)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- Orijinal Değişkenler (Aynen Korundu) ---
+# Bot ve Solana istemcisi
 solana_client = Client(SOLANA_RPC)
 application = Application.builder().token(BOT_TOKEN).build()
 
+# Üyelik planları
 memberships = {
     "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},
     "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},
@@ -52,7 +53,7 @@ memberships = {
 
 LAMBERT_TOLERANCE = 5000
 
-# --- Tüm Orijinal Handler'lar (Değişmedi) ---
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("New Membership", callback_data='new_membership')],
@@ -215,30 +216,30 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Update {update} caused error {context.error}")
 
-# --- Handlers Ekleme (Aynen Korundu) ---
+# Handlers ekle
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# --- Webhook Endpoint (Yeni Eklendi) ---
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(), application.bot)
     application.process_update(update)
     return "OK"
 
-# --- Render Uyumlu Başlatma (Değiştirilen Tek Kısım) ---
+# Render uyumlu başlatma
 if __name__ == '__main__':
-    if 'RENDER' in os.environ:  # Render'da çalışıyorsa
-        PORT = int(os.environ.get("PORT", 10000))
-        # Webhook için gerekli ayarlar
+    if 'RENDER' in os.environ:
+        PORT = int(os.environ.get('PORT', 10000))
+        app.run(host='0.0.0.0', port=PORT)
         application.run_webhook(
-            listen="0.0.0.0",
+            listen='0.0.0.0',
             port=PORT,
             webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook",
-            secret_token='RANDOM_SECRET_123'  # Güvenlik için rastgele bir string
+            secret_token=os.environ.get('WEBHOOK_SECRET', 'DEFAULT_SECRET_123')
         )
-    else:  # Local test için
-        application.run_polling(allowed_updates=None)
+    else:
+        application.run_polling()
