@@ -3,3 +3,5 @@ python-dotenv
 sqlalchemy
 python-telegram-bot==13.7  
 solana==0.30.0            
+python-telegram-bot==20.8  
+httpx==0.26.0            
