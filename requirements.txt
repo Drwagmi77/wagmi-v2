@@ -1,6 +1,6 @@
 python-telegram-bot[job-queue]==20.1
-solana==0.26.0
-httpx==0.23.3
 sqlalchemy
 psycopg2-binary
 python-dotenv
+solana==0.26.0
+httpx==0.23.3
