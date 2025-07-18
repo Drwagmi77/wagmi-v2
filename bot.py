@@ -75,6 +75,56 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def check_payment_periodically(user_id, wallet_address, plan, context):
+    price = PRICE_OPTIONS[plan]["price"]
+    duration = PRICE_OPTIONS[plan]["duration"]
+    expire_time = None if duration is None else datetime.utcnow() + duration
+
+    for _ in range(10):  # 10 deneme, 30 saniye aralık = 5 dakika
+        try:
+            txs = solana_client.get_signatures_for_address(Pubkey.from_string(WALLET_ADDRESS), limit=20)
+            found = False
+
+            for tx in txs.value:
+                sig = tx.signature
+                parsed = solana_client.get_transaction(sig)
+
+                if not parsed.value:
+                    continue
+
+                try:
+                    account_keys = parsed.value.transaction.message.account_keys
+                    if any(wallet_address in str(key) for key in account_keys):
+                        post_balance = parsed.value.meta.post_balances[0] / 1e9
+                        pre_balance = parsed.value.meta.pre_balances[0] / 1e9
+                        amount = abs(post_balance - pre_balance)
+
+                        if amount >= price:
+                            found = True
+                            break
+                except Exception:
+                    continue
+
+            if found:
+                user_membership[user_id] = {"plan": plan, "expires": expire_time}
+
+                await context.bot.send_message(
+                    chat_id=VIP_CHAT_ID,
+                    text=f"✅ New member: @{user_id} ({plan})"
+                )
+
+                await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+                await context.bot.send_message(chat_id=user_id, text="🎉 Payment confirmed! You have been added to the VIP group.")
+                return
+        except Exception:
+            pass
+
+        await asyncio.sleep(30)  # 30 saniye bekle
+
+    # 5 dakika sonunda ödeme bulunmazsa:
+    await context.bot.send_message(chat_id=user_id, text="❌ Payment not found after 5 minutes. Please check your transaction and try again.")
+
+
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     wallet_address = update.message.text.strip()
@@ -84,52 +134,12 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     plan = user_states[user_id]["plan"]
-    price = PRICE_OPTIONS[plan]["price"]
 
-    await update.message.reply_text("⏳ Verifying your payment...")
+    # Anında bilgilendir
+    await update.message.reply_text("⏳ Payment is being verified, please wait up to 5 minutes...")
 
-    try:
-        txs = solana_client.get_signatures_for_address(Pubkey.from_string(WALLET_ADDRESS), limit=20)
-        found = False
-
-        for tx in txs.value:
-            sig = tx.signature
-            parsed = solana_client.get_transaction(sig)
-
-            if not parsed.value:
-                continue
-
-            try:
-                account_keys = parsed.value.transaction.message.account_keys
-                if any(wallet_address in str(key) for key in account_keys):
-                    post_balance = parsed.value.meta.post_balances[0] / 1e9
-                    pre_balance = parsed.value.meta.pre_balances[0] / 1e9
-                    amount = abs(post_balance - pre_balance)
-
-                    if amount >= price:
-                        found = True
-                        break
-            except Exception as e:
-                continue
-
-        if found:
-            duration = PRICE_OPTIONS[plan]["duration"]
-            expire_time = None if duration is None else datetime.utcnow() + duration
-
-            user_membership[user_id] = {"plan": plan, "expires": expire_time}
-
-            await context.bot.send_message(
-                chat_id=VIP_CHAT_ID,
-                text=f"✅ New member: @{update.message.from_user.username or user_id} ({plan})"
-            )
-
-            await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
-            await update.message.reply_text("🎉 Payment confirmed! You have been added to the VIP group.")
-        else:
-            await update.message.reply_text("❌ Payment not found. Make sure you sent the correct amount from the correct wallet.")
-    except Exception as e:
-        logger.error(str(e))
-        await update.message.reply_text("⚠️ Error checking transaction. Please try again later.")
+    # Arka planda kontrolü başlat (fire and forget)
+    asyncio.create_task(check_payment_periodically(user_id, wallet_address, plan, context))
 
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
