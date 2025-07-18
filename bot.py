@@ -38,6 +38,8 @@ PRICE_OPTIONS = {
 
 solana_client = Client("https://api.mainnet-beta.solana.com")
 
+# Kullanıcıların son ödeme sorgulama zamanı (user_id -> datetime)
+last_check_time = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -80,7 +82,7 @@ async def check_payment_periodically(user_id, wallet_address, plan, context):
     duration = PRICE_OPTIONS[plan]["duration"]
     expire_time = None if duration is None else datetime.utcnow() + duration
 
-    for _ in range(10):  # 10 deneme, 30 saniye aralık = 5 dakika
+    for _ in range(4):  # 4 deneme, 15 saniye aralık = ~1 dakika
         try:
             txs = solana_client.get_signatures_for_address(Pubkey.from_string(WALLET_ADDRESS), limit=20)
             found = False
@@ -119,10 +121,10 @@ async def check_payment_periodically(user_id, wallet_address, plan, context):
         except Exception:
             pass
 
-        await asyncio.sleep(30)  # 30 saniye bekle
+        await asyncio.sleep(15)  # 15 saniye bekle
 
-    # 5 dakika sonunda ödeme bulunmazsa:
-    await context.bot.send_message(chat_id=user_id, text="❌ Payment not found after 5 minutes. Please check your transaction and try again.")
+    # ~1 dakika sonunda ödeme bulunmazsa:
+    await context.bot.send_message(chat_id=user_id, text="❌ Payment not found after about 1 minute. Please check your transaction and try again.")
 
 
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -133,12 +135,21 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please select a subscription plan first using /start.")
         return
 
+    # Aynı kullanıcı çok sık sorgu yapmasın diye kontrol
+    now = datetime.utcnow()
+    if user_id in last_check_time:
+        elapsed = (now - last_check_time[user_id]).total_seconds()
+        if elapsed < 15:
+            wait_time = int(15 - elapsed)
+            await update.message.reply_text(f"⏳ Please wait {wait_time} seconds before checking your payment again.")
+            return
+
+    last_check_time[user_id] = now
+
     plan = user_states[user_id]["plan"]
 
-    # Anında bilgilendir
-    await update.message.reply_text("⏳ Payment is being verified, please wait up to 5 minutes...")
+    await update.message.reply_text("⏳ Payment is being verified, please wait up to ~1 minute...")
 
-    # Arka planda kontrolü başlat (fire and forget)
     asyncio.create_task(check_payment_periodically(user_id, wallet_address, plan, context))
 
 
@@ -179,7 +190,6 @@ application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 
 application.job_queue.run_once(lambda ctx: remove_expired_members(application), when=1)
-
 
 if __name__ == "__main__":
     if 'RENDER' in os.environ:
