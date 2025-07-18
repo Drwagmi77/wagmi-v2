@@ -1,233 +1,187 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
-from sqlalchemy import create_engine, Column, BigInteger, String, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
-from solana.rpc.api import Client
-from datetime import datetime, timedelta
 import os
-from dotenv import load_dotenv
-import math
+import logging
+import asyncio
+from datetime import datetime, timedelta
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+from solders.pubkey import Pubkey
+from solders.rpc.requests import GetSignaturesForAddress
+from solana.rpc.api import Client
 
-# Load environment variables
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-SOLANA_WALLET_ADDRESS = os.getenv("SOLANA_WALLET_ADDRESS")
-SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+TOKEN = os.getenv("BOT_TOKEN")
+VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))  # Grup chat_id
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "EnterYourSolanaWalletHere")
 
-# Database setup
-Base = declarative_base()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class Membership(Base):
-    __tablename__ = "wagmi_memberships"
-    user_id = Column(BigInteger, primary_key=True)
-    membership_type = Column(String)
-    expiry_date = Column(DateTime)
+user_states = {}
+user_membership = {}
 
-class TempVerification(Base):
-    __tablename__ = "wagmi_temp_verifications"
-    user_id = Column(BigInteger, primary_key=True)
-    wallet_address = Column(String)
-
-# Ensure tables are created
-engine = create_engine(DATABASE_URL)
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-
-# Solana client
-solana_client = Client(SOLANA_RPC)
-
-# Membership configuration
-memberships = {
-    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},
-    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},
-    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},
-    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}
+PRICE_OPTIONS = {
+    "trial": {"price": 0.1, "duration": timedelta(days=3)},
+    "weekly": {"price": 0.3, "duration": timedelta(weeks=1)},
+    "monthly": {"price": 1.0, "duration": timedelta(days=30)},
+    "lifetime": {"price": 2.0, "duration": None},
 }
 
-LAMBERT_TOLERANCE = 5000
+solana_client = Client("https://api.mainnet-beta.solana.com")
 
-application = Application.builder().token(BOT_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("New Membership", callback_data='new_membership')],
-        [InlineKeyboardButton("Renew Membership", callback_data='renew_membership')]
+        [InlineKeyboardButton("💳 3 Days Trial - 0.1 SOL", callback_data="buy_trial")],
+        [InlineKeyboardButton("📆 Weekly - 0.3 SOL", callback_data="buy_weekly")],
+        [InlineKeyboardButton("🗓 Monthly - 1 SOL", callback_data="buy_monthly")],
+        [InlineKeyboardButton("♾ Lifetime - 2 SOL", callback_data="buy_lifetime")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "Welcome to the WAGMI VIP world!\nOur AI-powered signal bot scans 24/7 and sends signals to our group.\nJoin now!",
+        "👋 Welcome!\nChoose a subscription option to join our VIP group 👇",
         reply_markup=reply_markup
     )
+
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    choice = query.data.replace("buy_", "")
     user_id = query.from_user.id
+    user_states[user_id] = {"plan": choice}
 
-    with Session() as session:
-        try:
-            if query.data in ["new_membership", "renew_membership"]:
-                keyboard = [
-                    [InlineKeyboardButton("3-Day Trial (0.1 SOL)", callback_data='trial')],
-                    [InlineKeyboardButton("Weekly (0.3 SOL)", callback_data='weekly')],
-                    [InlineKeyboardButton("Monthly (1 SOL)", callback_data='monthly')],
-                    [InlineKeyboardButton("6-Month (2 SOL)", callback_data='six_month')]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text("Select a membership tier:", reply_markup=reply_markup)
+    price = PRICE_OPTIONS[choice]["price"]
 
-            elif query.data in memberships:
-                membership_type = query.data
-                amount = memberships[membership_type]["amount"]
+    await query.message.reply_text(
+        f"💸 Send exactly *{price} SOL* to the following address:\n\n"
+        f"`{WALLET_ADDRESS}`\n\n"
+        f"After sending, click the button below 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ I Sent the Payment", callback_data="confirm_payment")]
+        ]),
+        parse_mode="Markdown"
+    )
 
-                record = session.query(TempVerification).filter_by(user_id=user_id).first()
-                if record:
-                    record.wallet_address = "pending"
-                else:
-                    session.add(TempVerification(user_id=user_id, wallet_address="pending"))
-                session.commit()
-
-                payment_message = (
-                    f"Please send **{amount} SOL** to this address:\n\n`{SOLANA_WALLET_ADDRESS}`\n\n"
-                    "After sending, click the button below to enter your wallet address."
-                )
-                keyboard = [[InlineKeyboardButton("Enter Wallet Address", callback_data=f'enter_wallet_{membership_type}')]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(payment_message, parse_mode="Markdown", reply_markup=reply_markup)
-
-            elif query.data.startswith("enter_wallet_"):
-                membership_type = query.data.split("enter_wallet_")[1]
-                record = session.query(TempVerification).filter_by(user_id=user_id).first()
-                if record:
-                    record.wallet_address = "awaiting"
-                else:
-                    session.add(TempVerification(user_id=user_id, wallet_address="awaiting"))
-                session.commit()
-
-                await query.edit_message_text("Please enter the Solana wallet address you used for payment:")
-        except Exception as e:
-            await query.message.reply_text(f"Error: {str(e)}. Please try again or contact support.")
-            session.rollback()
 
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
     user_id = update.message.from_user.id
     wallet_address = update.message.text.strip()
 
-    with Session() as session:
-        try:
-            record = session.query(TempVerification).filter_by(user_id=user_id, wallet_address="awaiting").first()
-            if not record:
-                await update.message.reply_text("Please start the membership process with /start.")
-                return
+    if user_id not in user_states or "plan" not in user_states[user_id]:
+        await update.message.reply_text("Please select a subscription plan first using /start.")
+        return
 
-            await update.message.reply_text("Verifying your payment. Please wait...")
+    plan = user_states[user_id]["plan"]
+    price = PRICE_OPTIONS[plan]["price"]
 
-            signatures_resp = solana_client.get_signatures_for_address(SOLANA_WALLET_ADDRESS, limit=20)
-            if not signatures_resp.get("result"):
-                await update.message.reply_text("Could not fetch transactions from Solana network. Try again later.")
-                return
+    await update.message.reply_text("⏳ Verifying your payment...")
 
-            signatures = signatures_resp["result"]
-            found_membership_type = None
+    try:
+        txs = solana_client.get_signatures_for_address(Pubkey.from_string(WALLET_ADDRESS), limit=20)
+        found = False
 
-            for sig in signatures:
-                signature = sig["signature"]
-                tx_resp = solana_client.get_transaction(signature)
-                tx = tx_resp.get("result")
-                if not tx:
-                    continue
+        for tx in txs.value:
+            sig = tx.signature
+            parsed = solana_client.get_transaction(sig)
 
-                accounts = tx["transaction"]["message"]["accountKeys"]
-                if wallet_address not in accounts:
-                    continue
+            if not parsed.value:
+                continue
 
-                pre_balances = tx["meta"]["preBalances"]
-                post_balances = tx["meta"]["postBalances"]
+            try:
+                account_keys = parsed.value.transaction.message.account_keys
+                if any(wallet_address in str(key) for key in account_keys):
+                    post_balance = parsed.value.meta.post_balances[0] / 1e9
+                    pre_balance = parsed.value.meta.pre_balances[0] / 1e9
+                    amount = abs(post_balance - pre_balance)
 
-                try:
-                    sender_index = accounts.index(wallet_address)
-                    receiver_index = accounts.index(SOLANA_WALLET_ADDRESS)
-                except ValueError:
-                    continue
-
-                lamports_sent = pre_balances[sender_index] - post_balances[sender_index]
-
-                for mem_type, mem_info in memberships.items():
-                    expected_lamports = int(mem_info["amount"] * 1_000_000_000)
-                    if math.isclose(lamports_sent, expected_lamports, abs_tol=LAMBERT_TOLERANCE):
-                        found_membership_type = mem_type
+                    if amount >= price:
+                        found = True
                         break
+            except Exception as e:
+                continue
 
-                if found_membership_type:
-                    expiry_date = datetime.utcnow() + timedelta(seconds=memberships[found_membership_type]["duration"])
-                    membership = session.query(Membership).filter_by(user_id=user_id).first()
-                    if membership:
-                        membership.membership_type = found_membership_type
-                        membership.expiry_date = expiry_date
-                    else:
-                        session.add(Membership(user_id=user_id, membership_type=found_membership_type, expiry_date=expiry_date))
+        if found:
+            duration = PRICE_OPTIONS[plan]["duration"]
+            expire_time = None if duration is None else datetime.utcnow() + duration
 
-                    session.delete(record)
-                    session.commit()
+            user_membership[user_id] = {"plan": plan, "expires": expire_time}
 
-                    await context.bot.send_message(chat_id=user_id, text="✅ Payment verified! Adding you to the VIP group...")
-                    invite_link = await context.bot.export_chat_invite_link(GROUP_CHAT_ID)
-                    await context.bot.send_message(chat_id=user_id, text=f"Join the VIP group here:\n{invite_link}")
-                    return
+            await context.bot.send_message(
+                chat_id=VIP_CHAT_ID,
+                text=f"✅ New member: @{update.message.from_user.username or user_id} ({plan})"
+            )
 
-            await update.message.reply_text("❌ Payment not found. Ensure you sent the correct amount from the provided address.")
-        except Exception as e:
-            print(f"Error verifying payment: {e}")
-            await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
-            session.rollback()
+            await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+            await update.message.reply_text("🎉 Payment confirmed! You have been added to the VIP group.")
+        else:
+            await update.message.reply_text("❌ Payment not found. Make sure you sent the correct amount from the correct wallet.")
+    except Exception as e:
+        logger.error(str(e))
+        await update.message.reply_text("⚠️ Error checking transaction. Please try again later.")
 
-async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
-    with Session() as session:
-        try:
-            expired = session.query(Membership).filter(Membership.expiry_date < datetime.utcnow()).all()
-            for member in expired:
-                try:
-                    await context.bot.ban_chat_member(GROUP_CHAT_ID, member.user_id)
-                    await context.bot.unban_chat_member(GROUP_CHAT_ID, member.user_id)
-                    await context.bot.send_message(chat_id=member.user_id, text="Your VIP membership has expired. Use /start to renew.")
-                    session.delete(member)
-                except Exception as e:
-                    print(f"Error removing expired member {member.user_id}: {e}")
-            session.commit()
-        except Exception as e:
-            print(f"Error in remove_expired_members: {e}")
-            session.rollback()
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"Update {update} caused error {context.error}")
+async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text(
+        "🧾 Please enter the wallet address you used to send the payment:"
+    )
+
+
+async def remove_expired_members(application):
+    while True:
+        now = datetime.utcnow()
+        to_remove = []
+
+        for user_id, data in user_membership.items():
+            if data["expires"] and data["expires"] < now:
+                to_remove.append(user_id)
+
+        for user_id in to_remove:
+            try:
+                await application.bot.ban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+                await application.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+                logger.info(f"Removed expired user: {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to remove user {user_id}: {str(e)}")
+
+            del user_membership[user_id]
+
+        await asyncio.sleep(60)
+
+
+application = ApplicationBuilder().token(TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(handle_button))
+application.add_handler(CallbackQueryHandler(handle_button, pattern="^buy_"))
+application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_payment$"))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
-application.add_error_handler(error_handler)
 
-application.job_queue.run_repeating(remove_expired_members, interval=86400)
+application.job_queue.run_once(lambda ctx: remove_expired_members(application), when=1)
 
-# ✅ Webhook ayarları (404 çözümü burada!)
+
 if __name__ == "__main__":
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
         hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com')
         webhook_url = f"https://{hostname}/webhook"
+
         print(f"Starting webhook on {webhook_url}")
 
-        # Telegram'a webhook adresini bildiriyoruz
-        import asyncio
-        asyncio.run(application.bot.set_webhook(url=webhook_url))
-
         application.run_webhook(
-            listen='0.0.0.0',
+            listen="0.0.0.0",
             port=port,
-            webhook_url=webhook_url,
-            url_path="/webhook"  # 🔥 Bu satır olmazsa 404 hatası alınır!
+            url_path="/webhook",
+            webhook_url=webhook_url
         )
