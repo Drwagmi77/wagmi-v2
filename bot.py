@@ -228,5 +228,17 @@ application.add_error_handler(error_handler)
 # Periodic job every 24 hours
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Run bot with polling (ensure only one instance)
-application.run_polling(allowed_updates=[])  # Clear update queue to avoid conflicts
+# Run bot with webhook for Render
+if __name__ == "__main__":
+    if 'RENDER' in os.environ:
+        port = int(os.environ.get('PORT', 443))
+        webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
+        print(f"Starting webhook on {webhook_url}")  # Log kontrolü
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=port,
+            webhook_url=webhook_url,
+            secret_token=os.environ.get('WEBHOOK_SECRET', 'default_secret')
+        )
+    else:
+        application.run_polling(allowed_updates=[])
