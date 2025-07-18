@@ -40,19 +40,16 @@ solana_client = Client(SOLANA_RPC)
 
 # Membership configuration
 memberships = {
-    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},  # 3 days
-    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},  # 1 week
-    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},  # 1 month
-    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}  # 6 months
+    "trial": {"amount": 0.1, "duration": 3 * 24 * 60 * 60},
+    "weekly": {"amount": 0.3, "duration": 7 * 24 * 60 * 60},
+    "monthly": {"amount": 1, "duration": 30 * 24 * 60 * 60},
+    "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}
 }
 
-# Tolerance for lamports comparison
 LAMBERT_TOLERANCE = 5000
 
-# Create bot application
 application = Application.builder().token(BOT_TOKEN).build()
 
-# START command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("New Membership", callback_data='new_membership')],
@@ -64,7 +61,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# Handle button interactions
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -115,7 +111,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"Error: {str(e)}. Please try again or contact support.")
             session.rollback()
 
-# Handle wallet address input and verify payment
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -191,7 +186,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
             session.rollback()
 
-# Remove expired members
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     with Session() as session:
         try:
@@ -209,20 +203,17 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
             print(f"Error in remove_expired_members: {e}")
             session.rollback()
 
-# Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"Update {update} caused error {context.error}")
 
-# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
 
-# Periodic job
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Run bot with webhook
+# ✅ Webhook ayarları (404 çözümü burada!)
 if __name__ == "__main__":
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
@@ -230,12 +221,13 @@ if __name__ == "__main__":
         webhook_url = f"https://{hostname}/webhook"
         print(f"Starting webhook on {webhook_url}")
 
-        # Telegram'a webhook'u bildiriyoruz
+        # Telegram'a webhook adresini bildiriyoruz
         import asyncio
         asyncio.run(application.bot.set_webhook(url=webhook_url))
 
         application.run_webhook(
             listen='0.0.0.0',
             port=port,
-            webhook_url=webhook_url
+            webhook_url=webhook_url,
+            url_path="/webhook"  # 🔥 Bu satır olmazsa 404 hatası alınır!
         )
