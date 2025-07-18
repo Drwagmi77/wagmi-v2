@@ -21,7 +21,7 @@ from solana.rpc.api import Client
 
 TOKEN = os.getenv("BOT_TOKEN")
 VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))  # Grup chat_id
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "EnterYourSolanaWalletHere")
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "Fify9uEQ98CgQ6T3NeNUCQC7qvEAUmnhrsRmzKm3n4Gf")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
