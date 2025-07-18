@@ -24,7 +24,7 @@ VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))  # Grup chat_id
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "Fify9uEQ98CgQ6T3NeNUCQC7qvEAUmnhrsRmzKm3n4Gf")
 
 # Helius API anahtarını çevre değişkeninden al
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "7930dbab-e806-4f3f-bf3b-716a14c6e3c3")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "ad9bb0ce-b128-4fba-9627-5ddd470f7bc1")
 # Helius RPC URL'si
 solana_client = Client(f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}")
 
@@ -90,7 +90,7 @@ async def check_payment_periodically(user_id, wallet_address, plan, context):
 
             for tx in txs.value:
                 sig = tx.signature
-                parsed = solana_client.get_transaction(sig)
+                parsed = solana_client.get_transaction(sig, max_supported_transaction_version=0)
 
                 if not parsed.value:
                     continue
