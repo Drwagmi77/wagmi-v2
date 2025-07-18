@@ -46,8 +46,8 @@ memberships = {
     "six_month": {"amount": 2, "duration": 180 * 24 * 60 * 60}  # 6 months
 }
 
-# Tolerance for lamports comparison (1 SOL = 1_000_000_000 lamports)
-LAMBERT_TOLERANCE = 5000  # small tolerance to handle minor discrepancies
+# Tolerance for lamports comparison
+LAMBERT_TOLERANCE = 5000
 
 # Create bot application
 application = Application.builder().token(BOT_TOKEN).build()
@@ -86,7 +86,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 membership_type = query.data
                 amount = memberships[membership_type]["amount"]
 
-                # Update or add TempVerification with 'pending'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "pending"
@@ -94,7 +93,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     session.add(TempVerification(user_id=user_id, wallet_address="pending"))
                 session.commit()
 
-                # Send payment instructions
                 payment_message = (
                     f"Please send **{amount} SOL** to this address:\n\n`{SOLANA_WALLET_ADDRESS}`\n\n"
                     "After sending, click the button below to enter your wallet address."
@@ -105,8 +103,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif query.data.startswith("enter_wallet_"):
                 membership_type = query.data.split("enter_wallet_")[1]
-
-                # Update or add TempVerification with 'awaiting'
                 record = session.query(TempVerification).filter_by(user_id=user_id).first()
                 if record:
                     record.wallet_address = "awaiting"
@@ -174,14 +170,12 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if found_membership_type:
                     expiry_date = datetime.utcnow() + timedelta(seconds=memberships[found_membership_type]["duration"])
-
                     membership = session.query(Membership).filter_by(user_id=user_id).first()
                     if membership:
                         membership.membership_type = found_membership_type
                         membership.expiry_date = expiry_date
                     else:
-                        membership = Membership(user_id=user_id, membership_type=found_membership_type, expiry_date=expiry_date)
-                        session.add(membership)
+                        session.add(Membership(user_id=user_id, membership_type=found_membership_type, expiry_date=expiry_date))
 
                     session.delete(record)
                     session.commit()
@@ -197,7 +191,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
             session.rollback()
 
-# Remove expired members daily
+# Remove expired members
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     with Session() as session:
         try:
@@ -212,8 +206,8 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
                     print(f"Error removing expired member {member.user_id}: {e}")
             session.commit()
         except Exception as e:
-            session.rollback()
             print(f"Error in remove_expired_members: {e}")
+            session.rollback()
 
 # Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,18 +219,23 @@ application.add_handler(CallbackQueryHandler(handle_button))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 application.add_error_handler(error_handler)
 
-# Periodic job every 24 hours
+# Periodic job
 application.job_queue.run_repeating(remove_expired_members, interval=86400)
 
-# Run bot with webhook for Render
+# Run bot with webhook
 if __name__ == "__main__":
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
-        webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
-        print(f"Starting webhook on {webhook_url}")  # Log kontrolü
+        hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com')
+        webhook_url = f"https://{hostname}/webhook"
+        print(f"Starting webhook on {webhook_url}")
+
+        # Telegram'a webhook'u bildiriyoruz
+        import asyncio
+        asyncio.run(application.bot.set_webhook(url=webhook_url))
+
         application.run_webhook(
             listen='0.0.0.0',
             port=port,
-            webhook_url=webhook_url,
-            secret_token=os.environ.get('WEBHOOK_SECRET', 'default_secret')
+            webhook_url=webhook_url
         )
