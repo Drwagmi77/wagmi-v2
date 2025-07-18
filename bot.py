@@ -240,5 +240,3 @@ if __name__ == "__main__":
             webhook_url=webhook_url,
             secret_token=os.environ.get('WEBHOOK_SECRET', 'default_secret')
         )
-    else:
-        application.run_polling(allowed_updates=[])
