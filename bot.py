@@ -16,7 +16,8 @@ from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 # Solders kütüphanesinden gerekli sınıfları import edelim
-from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction, CompiledInstruction
+from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction
+from solders.instruction import CompiledInstruction # BU SATIR DEĞİŞTİRİLDİ!
 
 # Config
 TOKEN = os.getenv("BOT_TOKEN")
