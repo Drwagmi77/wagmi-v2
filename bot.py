@@ -2,7 +2,6 @@ import os
 import logging
 import asyncio
 import re
-import aiohttp
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,13 +12,23 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from solders.pubkey import Pubkey
+from solana.rpc.api import Client
+from solana.rpc.commitment import Confirmed
 
 # Config
 TOKEN = os.getenv("BOT_TOKEN")
 VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "Fify9uEQ98CgQ6T3NeNUCQC7qvEAUmnhrsRmzKm3n4Gf")
-SOLSCAN_API_URL = "https://public-api.solscan.io"
-WALLET_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{42,44}$"  # Solana cüzdan adresi için regex
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "7930dbab-e806-4f3f-bf3b-716a14c6e3c3")
+WALLET_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{42,44}$"
+
+# Initialize Solana Client
+solana_client = Client(
+    f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
+    timeout=30,
+    commitment=Confirmed
+)
 
 # Logging
 logging.basicConfig(
@@ -80,6 +89,38 @@ async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📤 Please provide the wallet address you used to send the payment:"
     )
 
+async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
+    try:
+        signatures = solana_client.get_signatures_for_address(
+            Pubkey.from_string(WALLET_ADDRESS),
+            limit=5,
+            commitment=Confirmed
+        ).value
+
+        for sig in signatures:
+            tx = solana_client.get_transaction(
+                sig.signature,
+                encoding="jsonParsed",
+                max_supported_transaction_version=0  # Hata düzeltmesi
+            ).value
+            
+            if not tx:
+                continue
+
+            # Gönderici adresini kontrol et
+            sender = str(tx.transaction.message.account_keys[0])
+            # Transfer miktarını hesapla (SOL cinsinden)
+            transferred = abs(tx.meta.post_balances[0] - tx.meta.pre_balances[0]) / 1e9
+            
+            if sender == wallet_address and transferred >= expected_sol:
+                logger.info(f"Payment verified: {transferred} SOL from {sender}")
+                return True
+                
+    except Exception as e:
+        logger.error(f"Payment verification failed: {e}")
+    
+    return False
+
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         logger.warning("handle_wallet received an update without a message")
@@ -101,40 +142,28 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = PRICE_OPTIONS[plan]["duration"]
     expire_time = None if duration is None else datetime.utcnow() + duration
 
-    await update.message.reply_text("🔍 Verifying your payment... (This may take a few seconds)")
+    await update.message.reply_text("🔍 Verifying your payment... (This may take up to 5 minutes)")
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            # Solscan API ile son işlemleri al
-            async with session.get(f"{SOLSCAN_API_URL}/account/transactions?account={WALLET_ADDRESS}&limit=5") as response:
-                if response.status != 200:
-                    await update.message.reply_text("❌ Error verifying payment. Please try again.")
-                    return
-                transactions = await response.json()
-                
-                for tx in transactions:
-                    if wallet_address in [acc["address"] for acc in tx.get("accountList", [])]:
-                        amount = tx.get("lamports", 0) / 1e9
-                        if amount >= price and WALLET_ADDRESS in [acc["address"] for acc in tx.get("accountList", [])]:
-                            user_membership[user_id] = {"plan": plan, "expires": expire_time}
-                            logger.info(f"Payment verified: User {user_id}, plan {plan}, amount {amount} SOL")
-                            await context.bot.send_message(
-                                chat_id=VIP_CHAT_ID,
-                                text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
-                            )
-                            await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
-                            await update.message.reply_text(
-                                "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
-                            )
-                            return
-                
-                await update.message.reply_text(
-                    f"❌ No payment of {price} SOL found from {wallet_address} to {WALLET_ADDRESS}. "
-                    "Please check your transaction and try again."
-                )
-        except Exception as e:
-            logger.error(f"Payment verification error: {e}")
-            await update.message.reply_text("❌ Error verifying payment. Please try again or contact support.")
+    # Ödeme doğrulaması (4 kez, 75 saniye aralıklarla)
+    for _ in range(4):
+        if await verify_payment(wallet_address, price):
+            user_membership[user_id] = {"plan": plan, "expires": expire_time}
+            logger.info(f"Payment verified: User {user_id}, plan {plan}, amount {price} SOL")
+            await context.bot.send_message(
+                chat_id=VIP_CHAT_ID,
+                text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
+            )
+            await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+            await update.message.reply_text(
+                "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
+            )
+            return
+        await asyncio.sleep(75)
+
+    await update.message.reply_text(
+        f"❌ No payment of {price} SOL found from {wallet_address} to {WALLET_ADDRESS}. "
+        "Please check your transaction and try again or use /support."
+    )
 
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.utcnow()
@@ -155,9 +184,15 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.message:
-        await update.message.reply_text("⚠️ An error occurred. Please try again or contact support.")
+        await update.message.reply_text("⚠️ An error occurred. Please try again or contact support with /support.")
     elif update and update.callback_query:
-        await update.callback_query.message.reply_text("⚠️ An error occurred. Please try again or contact support.")
+        await update.callback_query.message.reply_text("⚠️ An error occurred. Please try again or contact support with /support.")
+
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Having trouble with your payment? 💸 Please share your wallet address and details, "
+        "and our team will assist you promptly! 🚀"
+    )
 
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
@@ -167,6 +202,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_button, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_payment$"))
     application.add_handler(MessageHandler(filters.Regex(WALLET_ADDRESS_REGEX), handle_wallet))
+    application.add_handler(CommandHandler("support", support))
     application.add_error_handler(error_handler)
 
     # Job Queue
@@ -177,12 +213,14 @@ def main():
         port = int(os.environ.get('PORT', 443))
         webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
         application.bot.delete_webhook(drop_pending_updates=True)
+        print(f"Starting webhook on {webhook_url}")
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
             webhook_url=webhook_url
         )
     else:
+        print("Starting polling mode")
         application.run_polling()
 
 if __name__ == "__main__":
