@@ -23,6 +23,11 @@ TOKEN = os.getenv("BOT_TOKEN")
 VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))  # Grup chat_id
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "Fify9uEQ98CgQ6T3NeNUCQC7qvEAUmnhrsRmzKm3n4Gf")
 
+# Helius API anahtarını çevre değişkeninden al
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "7930dbab-e806-4f3f-bf3b-716a14c6e3c3")
+# Helius RPC URL'si
+solana_client = Client(f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -35,9 +40,6 @@ PRICE_OPTIONS = {
     "monthly": {"price": 1.0, "duration": timedelta(days=30)},
     "lifetime": {"price": 2.0, "duration": None},
 }
-
-solana_client = Client("https://api.mainnet-beta.solana.com")
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -52,7 +54,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Welcome!\nChoose a subscription option to join our VIP group 👇",
         reply_markup=reply_markup
     )
-
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -73,7 +74,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]),
         parse_mode="Markdown"
     )
-
 
 async def check_payment_periodically(user_id, wallet_address, plan, context):
     price = PRICE_OPTIONS[plan]["price"]
@@ -126,7 +126,6 @@ async def check_payment_periodically(user_id, wallet_address, plan, context):
 
     await context.bot.send_message(chat_id=user_id, text="❌ Payment not found after 5 minutes. Please check your transaction and try again.")
 
-
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     wallet_address = update.message.text.strip()
@@ -141,13 +140,11 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(check_payment_periodically(user_id, wallet_address, plan, context))
 
-
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
         "🧾 Please enter the wallet address you used to send the payment:"
     )
-
 
 async def remove_expired_members(application):
     while True:
@@ -170,7 +167,6 @@ async def remove_expired_members(application):
 
         await asyncio.sleep(60)
 
-
 application = ApplicationBuilder().token(TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
@@ -179,7 +175,6 @@ application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 
 application.job_queue.run_once(lambda ctx: remove_expired_members(application), when=1)
-
 
 if __name__ == "__main__":
     if 'RENDER' in os.environ:
