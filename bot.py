@@ -107,11 +107,10 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
         for sig in signatures:
             tx_response = solana_client.get_transaction(
                 sig.signature,
-                encoding=UiTransactionEncoding.JsonParsed.value, # BURADA .value EKLENDİ!
+                encoding="jsonParsed", # BURADA DİREKT STRING KULLANILDI!
                 max_supported_transaction_version=0
             )
             
-            # tx_response.value'nun None veya boş olup olmadığını kontrol et
             if not tx_response or not tx_response.value:
                 logger.warning(f"No transaction data (or value is None) for signature {sig.signature}")
                 continue
