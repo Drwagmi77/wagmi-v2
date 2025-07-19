@@ -17,7 +17,7 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 # Solders kütüphanesinden gerekli sınıfları import edelim
 from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction
-from solders.instruction import CompiledInstruction # BU SATIR DEĞİŞTİRİLDİ!
+from solders.instruction import CompiledInstruction 
 
 # Config
 TOKEN = os.getenv("BOT_TOKEN")
@@ -107,7 +107,7 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
         for sig in signatures:
             tx_response = solana_client.get_transaction(
                 sig.signature,
-                encoding=UiTransactionEncoding.JsonParsed, # Encoding'i açıkça belirtiyoruz
+                encoding=UiTransactionEncoding.JsonParsed.value, # BURADA .value EKLENDİ!
                 max_supported_transaction_version=0
             )
             
@@ -116,37 +116,29 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
                 logger.warning(f"No transaction data (or value is None) for signature {sig.signature}")
                 continue
             
-            # `tx_response.value` doğrudan EncodedTransactionWithStatusMeta olmalı
-            # ve bu objenin `transaction` ve `meta` attribute'ları olmalı.
-            transaction_data = tx_response.value # Bu objenin tipini EncodedTransactionWithStatusMeta olarak varsayıyoruz
+            transaction_data = tx_response.value 
 
-            # Meta verisinin varlığını kontrol et
             if not hasattr(transaction_data, 'meta') or transaction_data.meta is None:
                 logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig.signature}")
                 continue
             
             meta = transaction_data.meta
 
-            # İşlem verisinin varlığını kontrol et
             if not hasattr(transaction_data, 'transaction') or transaction_data.transaction is None:
                 logger.warning(f"Transaction data has no 'transaction' attribute or 'transaction' is None for signature {sig.signature}")
                 continue
 
             transaction = transaction_data.transaction
 
-            # İşlem mesajı ve account_keys varlığını kontrol et
             if not hasattr(transaction, 'message') or not hasattr(transaction.message, 'account_keys'):
                 logger.warning(f"Transaction or message/account_keys not found for signature {sig.signature}")
                 continue
 
-            # Gönderici adresi, genellikle ilk account_key'dir.
             sender = str(transaction.message.account_keys[0].pubkey) 
             
             transferred = 0.0
             
-            # 'meta' objesi üzerindeki 'post_balances' ve 'pre_balances'i kontrol et
             if meta.post_balances and meta.pre_balances and len(meta.post_balances) > 0 and len(meta.pre_balances) > 0:
-                # Alıcı cüzdanın (yani sizin cüzdanınızın) account_keys listesindeki index'ini bul
                 receiver_index = -1
                 for i, key in enumerate(transaction.message.account_keys):
                     if str(key.pubkey) == WALLET_ADDRESS:
@@ -154,32 +146,25 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
                         break
                 
                 if receiver_index != -1 and receiver_index < len(meta.post_balances) and receiver_index < len(meta.pre_balances):
-                    # Alıcı cüzdanın bakiyesindeki artışı kontrol et (size yapılan ödemeler)
                     balance_change = meta.post_balances[receiver_index] - meta.pre_balances[receiver_index]
-                    if balance_change > 0: # Sadece pozitif değişimleri (gelen ödemeleri) dikkate alıyoruz
-                        transferred = balance_change / 1e9 # lamports'u SOL'a çevir
+                    if balance_change > 0:
+                        transferred = balance_change / 1e9
 
-            # Eğer balances ile bulunamazsa veya eksikse, inner_instructions kontrol edilebilir.
             if transferred == 0 and meta.inner_instructions:
                 for inner_inst in meta.inner_instructions:
                     for inst in inner_inst.instructions:
-                        # Eğer inst bir ParsedInstruction objesiyse ve bir transfer işlemiyse
                         if isinstance(inst, ParsedInstruction) and inst.parsed and inst.parsed['type'] == 'transfer':
                             info = inst.parsed['info']
                             if info['source'] == wallet_address and info['destination'] == WALLET_ADDRESS:
                                 transferred_lamports = info['lamports']
                                 transferred = transferred_lamports / 1e9
                                 break
-                        # Eğer inst bir CompiledInstruction ise ve SystemProgram transferi ise (daha düşük seviye)
-                        elif isinstance(inst, CompiledInstruction) and inst.program_id_index == 0: # System Program
-                             # Data'yı decode etmeniz gerekebilir, bu daha karmaşık bir senaryo.
-                             # Şu an için parsed instruction'lara odaklanalım.
+                        elif isinstance(inst, CompiledInstruction) and inst.program_id_index == 0:
                             pass
                     if transferred > 0:
-                        break # Transfer bulunduysa döngüyü kır
+                        break
 
-            # Küçük bir toleransla karşılaştırma yap
-            if sender == wallet_address and transferred >= (expected_sol - 0.000000001): # SOL için küçük bir fark
+            if sender == wallet_address and transferred >= (expected_sol - 0.000000001):
                 logger.info(f"Payment verified: {transferred} SOL from {sender}")
                 return True
                 
@@ -212,7 +197,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Verifying your payment... (This may take up to 5 minutes)")
 
-    for _ in range(4): # 4 deneme, her deneme arasında 75 saniye bekler (toplam 5 dakika)
+    for _ in range(4):
         if await verify_payment(wallet_address, price):
             user_membership[user_id] = {"plan": plan, "expires": expire_time}
             logger.info(f"Payment verified: User {user_id}, plan {plan}, amount {price} SOL")
@@ -221,7 +206,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
             )
             try:
-                # Botun "Can add members" yetkisi olduğundan emin olun
                 await context.bot.add_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) 
                 
                 await update.message.reply_text(
@@ -233,7 +217,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "✅ Payment confirmed, but failed to add you to the VIP group. Please contact support with /support."
                 )
             return
-        await asyncio.sleep(75) # 75 saniye bekle
+        await asyncio.sleep(75)
 
     await update.message.reply_text(
         f"❌ No payment of {price} SOL found from {wallet_address} to {WALLET_ADDRESS}. "
@@ -250,7 +234,7 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     for user_id in expired_users:
         try:
             await context.bot.ban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
-            await context.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu, kullanıcının tekrar katılmasını engeller
+            await context.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
             del user_membership[user_id]
             logger.info(f"Removed expired user: {user_id}")
         except Exception as e:
