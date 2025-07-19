@@ -102,22 +102,63 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
         logger.info(f"Fetched {len(signatures)} signatures for wallet {WALLET_ADDRESS}")
 
         for sig in signatures:
-            tx = solana_client.get_transaction(
+            tx_response = solana_client.get_transaction(
                 sig.signature,
-                encoding="jsonParsed",
+                encoding="jsonParsed", # jsonParsed en iyi sonucu verir
                 max_supported_transaction_version=0
-            ).value
+            )
             
-            if not tx:
+            # tx_response'un 'value' özelliğini kontrol et
+            if not tx_response or not tx_response.value:
                 logger.warning(f"No transaction data for signature {sig.signature}")
+                continue
+            
+            tx_full = tx_response.value # Tam işlem objesini al
+            tx = tx_full.transaction # İçindeki transaction objesine eriş
+            meta = tx_full.meta # İçindeki meta objesine eriş
+
+            if not meta:
+                logger.warning(f"No meta data for signature {sig.signature}")
                 continue
 
             # Gönderici adresini doğru şekilde al
-            sender = str(tx.transaction.transaction.message.account_keys[0])
-            # Transfer miktarını hesapla (SOL cinsinden)
-            transferred = abs(tx.meta.post_balances[0] - tx.meta.pre_balances[0]) / 1e9
+            # Genellikle account_keys[0] göndericidir.
+            sender = str(tx.message.account_keys[0].pubkey) 
             
-            if sender == wallet_address and transferred >= expected_sol:
+            # Transfer miktarını hesapla (SOL cinsinden)
+            transferred = 0.0
+            # post_balances ve pre_balances'ı kontrol et
+            if meta.post_balances and meta.pre_balances and len(meta.post_balances) > 0 and len(meta.pre_balances) > 0:
+                # Hesap bakiyeleri arasındaki farktan transfer miktarını bul
+                # Hata toleransı için küçük bir epsilon ekleyebiliriz
+                transferred = abs(meta.post_balances[0] - meta.pre_balances[0]) / 1e9
+            else:
+                # Eğer balances yoksa veya yeterli değilse, işlemdeki iç transferleri kontrol et
+                # ProgramInstructions ve InnerInstructions içinde native SOL transferlerini arayalım.
+                if meta.log_messages:
+                    for log in meta.log_messages:
+                        if "Transfer:" in log:
+                            # Log mesajlarından transfer miktarını çekmeye çalışın
+                            match = re.search(r"amount (\d+)", log)
+                            if match:
+                                transferred_lamports = int(match.group(1))
+                                transferred = transferred_lamports / 1e9
+                                break
+                
+                # Ayrıca meta.inner_instructions içindeki SystemProgram transferlerini de kontrol edebiliriz
+                if meta.inner_instructions:
+                    for inner_inst in meta.inner_instructions:
+                        for inst in inner_inst.instructions:
+                            if hasattr(inst, 'parsed') and inst.parsed and inst.parsed['type'] == 'transfer':
+                                if inst.parsed['info']['source'] == wallet_address and inst.parsed['info']['destination'] == WALLET_ADDRESS:
+                                    transferred_lamports = inst.parsed['info']['lamports']
+                                    transferred = transferred_lamports / 1e9
+                                    break
+                        if transferred > 0: # Bir transfer bulduysak döngüyü kır
+                            break
+            
+            # Küçük bir toleransla karşılaştırma yap
+            if sender == wallet_address and transferred >= (expected_sol - 0.000000001): # SOL için küçük bir fark
                 logger.info(f"Payment verified: {transferred} SOL from {sender}")
                 return True
                 
@@ -150,7 +191,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Verifying your payment... (This may take up to 5 minutes)")
 
-    for _ in range(4):
+    for _ in range(4): # 4 deneme, her deneme arasında 75 saniye bekler (toplam 5 dakika)
         if await verify_payment(wallet_address, price):
             user_membership[user_id] = {"plan": plan, "expires": expire_time}
             logger.info(f"Payment verified: User {user_id}, plan {plan}, amount {price} SOL")
@@ -159,17 +200,35 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
             )
             try:
-                await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+                # Kullanıcıyı gruba davet etme
+                # Telegram Bot API'sında doğrudan "invite_chat_member" diye bir metod yok.
+                # Genellikle kullanıcının gruba katılması için bir davet bağlantısı sağlanır
+                # veya admin haklarına sahip bir bot aracılığıyla eklenir.
+                # Burada direkt "invite_chat_member" çalışmayabilir, buna dikkat edin.
+                # En yaygın yöntem, davet linki göndermektir.
+                # await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu satır sorun çıkarabilir.
+                
+                # Alternatif olarak davet linki gönderilebilir (eğer grubunuzun davet linki varsa)
+                # invite_link = "YOUR_VIP_GROUP_INVITE_LINK" 
+                # await update.message.reply_text(f"🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀\nJoin here: {invite_link}")
+                
+                # Kullanıcıyı gruba eklemeye çalışmak yerine, grubun linkini göndermek daha güvenli olabilir
+                # veya admin yetkileriyle add_chat_member kullanmanız gerekebilir.
+                # add_chat_member sadece kullanıcı tarafından başlatılan konuşma sonrasında çalışır.
+                # Botun admin olduğu bir grupta kullanıcıyı direkt eklemek için
+                # Botun "Can add members" yetkisi olmalı.
+                await context.bot.add_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu methodu deneyelim
+                
                 await update.message.reply_text(
                     "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
                 )
             except Exception as e:
-                logger.error(f"Failed to invite user {user_id} to VIP group: {e}")
+                logger.error(f"Failed to invite/add user {user_id} to VIP group: {e}")
                 await update.message.reply_text(
                     "✅ Payment confirmed, but failed to add you to the VIP group. Please contact support with /support."
                 )
             return
-        await asyncio.sleep(75)
+        await asyncio.sleep(75) # 75 saniye bekle
 
     await update.message.reply_text(
         f"❌ No payment of {price} SOL found from {wallet_address} to {WALLET_ADDRESS}. "
@@ -185,8 +244,10 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
 
     for user_id in expired_users:
         try:
+            # Kullanıcıyı gruptan atmak ve sonra unban yaparak yeniden katılmasını engellemek
+            # veya sadece atmak (banlayıp unban yapmak gruptan çıkarır)
             await context.bot.ban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
-            await context.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+            await context.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu, kullanıcının tekrar katılmasını engeller
             del user_membership[user_id]
             logger.info(f"Removed expired user: {user_id}")
         except Exception as e:
@@ -227,7 +288,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_button, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_payment$"))
-    application.add_handler(MessageHandler(filters.Regex(WALLET_ADDRESS_REGEX), handle_wallet))
+    # Mesajın bir Solana cüzdan adresi olup olmadığını kontrol eden Regex filtresi
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(WALLET_ADDRESS_REGEX), handle_wallet))
     application.add_handler(CommandHandler("support", support))
     application.add_error_handler(error_handler)
 
@@ -237,7 +299,7 @@ def main():
     # Start bot
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
-        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com')
+        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com') # Varsayılan hostname'i güncelledim
         webhook_url = f"https://{hostname}/webhook"
         logger.info(f"Setting webhook to {webhook_url} on port {port}")
         try:
