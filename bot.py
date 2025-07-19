@@ -15,6 +15,8 @@ from telegram.ext import (
 from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
+# Solders kütüphanesinden gerekli sınıfları import edelim
+from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction, CompiledInstruction
 
 # Config
 TOKEN = os.getenv("BOT_TOKEN")
@@ -104,59 +106,77 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
         for sig in signatures:
             tx_response = solana_client.get_transaction(
                 sig.signature,
-                encoding="jsonParsed", # jsonParsed en iyi sonucu verir
+                encoding=UiTransactionEncoding.JsonParsed, # Encoding'i açıkça belirtiyoruz
                 max_supported_transaction_version=0
             )
             
-            # tx_response'un 'value' özelliğini kontrol et
+            # tx_response.value'nun None veya boş olup olmadığını kontrol et
             if not tx_response or not tx_response.value:
-                logger.warning(f"No transaction data for signature {sig.signature}")
+                logger.warning(f"No transaction data (or value is None) for signature {sig.signature}")
                 continue
             
-            tx_full = tx_response.value # Tam işlem objesini al
-            tx = tx_full.transaction # İçindeki transaction objesine eriş
-            meta = tx_full.meta # İçindeki meta objesine eriş
+            # `tx_response.value` doğrudan EncodedTransactionWithStatusMeta olmalı
+            # ve bu objenin `transaction` ve `meta` attribute'ları olmalı.
+            transaction_data = tx_response.value # Bu objenin tipini EncodedTransactionWithStatusMeta olarak varsayıyoruz
 
-            if not meta:
-                logger.warning(f"No meta data for signature {sig.signature}")
+            # Meta verisinin varlığını kontrol et
+            if not hasattr(transaction_data, 'meta') or transaction_data.meta is None:
+                logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig.signature}")
+                continue
+            
+            meta = transaction_data.meta
+
+            # İşlem verisinin varlığını kontrol et
+            if not hasattr(transaction_data, 'transaction') or transaction_data.transaction is None:
+                logger.warning(f"Transaction data has no 'transaction' attribute or 'transaction' is None for signature {sig.signature}")
                 continue
 
-            # Gönderici adresini doğru şekilde al
-            # Genellikle account_keys[0] göndericidir.
-            sender = str(tx.message.account_keys[0].pubkey) 
+            transaction = transaction_data.transaction
+
+            # İşlem mesajı ve account_keys varlığını kontrol et
+            if not hasattr(transaction, 'message') or not hasattr(transaction.message, 'account_keys'):
+                logger.warning(f"Transaction or message/account_keys not found for signature {sig.signature}")
+                continue
+
+            # Gönderici adresi, genellikle ilk account_key'dir.
+            sender = str(transaction.message.account_keys[0].pubkey) 
             
-            # Transfer miktarını hesapla (SOL cinsinden)
             transferred = 0.0
-            # post_balances ve pre_balances'ı kontrol et
+            
+            # 'meta' objesi üzerindeki 'post_balances' ve 'pre_balances'i kontrol et
             if meta.post_balances and meta.pre_balances and len(meta.post_balances) > 0 and len(meta.pre_balances) > 0:
-                # Hesap bakiyeleri arasındaki farktan transfer miktarını bul
-                # Hata toleransı için küçük bir epsilon ekleyebiliriz
-                transferred = abs(meta.post_balances[0] - meta.pre_balances[0]) / 1e9
-            else:
-                # Eğer balances yoksa veya yeterli değilse, işlemdeki iç transferleri kontrol et
-                # ProgramInstructions ve InnerInstructions içinde native SOL transferlerini arayalım.
-                if meta.log_messages:
-                    for log in meta.log_messages:
-                        if "Transfer:" in log:
-                            # Log mesajlarından transfer miktarını çekmeye çalışın
-                            match = re.search(r"amount (\d+)", log)
-                            if match:
-                                transferred_lamports = int(match.group(1))
+                # Alıcı cüzdanın (yani sizin cüzdanınızın) account_keys listesindeki index'ini bul
+                receiver_index = -1
+                for i, key in enumerate(transaction.message.account_keys):
+                    if str(key.pubkey) == WALLET_ADDRESS:
+                        receiver_index = i
+                        break
+                
+                if receiver_index != -1 and receiver_index < len(meta.post_balances) and receiver_index < len(meta.pre_balances):
+                    # Alıcı cüzdanın bakiyesindeki artışı kontrol et (size yapılan ödemeler)
+                    balance_change = meta.post_balances[receiver_index] - meta.pre_balances[receiver_index]
+                    if balance_change > 0: # Sadece pozitif değişimleri (gelen ödemeleri) dikkate alıyoruz
+                        transferred = balance_change / 1e9 # lamports'u SOL'a çevir
+
+            # Eğer balances ile bulunamazsa veya eksikse, inner_instructions kontrol edilebilir.
+            if transferred == 0 and meta.inner_instructions:
+                for inner_inst in meta.inner_instructions:
+                    for inst in inner_inst.instructions:
+                        # Eğer inst bir ParsedInstruction objesiyse ve bir transfer işlemiyse
+                        if isinstance(inst, ParsedInstruction) and inst.parsed and inst.parsed['type'] == 'transfer':
+                            info = inst.parsed['info']
+                            if info['source'] == wallet_address and info['destination'] == WALLET_ADDRESS:
+                                transferred_lamports = info['lamports']
                                 transferred = transferred_lamports / 1e9
                                 break
-                
-                # Ayrıca meta.inner_instructions içindeki SystemProgram transferlerini de kontrol edebiliriz
-                if meta.inner_instructions:
-                    for inner_inst in meta.inner_instructions:
-                        for inst in inner_inst.instructions:
-                            if hasattr(inst, 'parsed') and inst.parsed and inst.parsed['type'] == 'transfer':
-                                if inst.parsed['info']['source'] == wallet_address and inst.parsed['info']['destination'] == WALLET_ADDRESS:
-                                    transferred_lamports = inst.parsed['info']['lamports']
-                                    transferred = transferred_lamports / 1e9
-                                    break
-                        if transferred > 0: # Bir transfer bulduysak döngüyü kır
-                            break
-            
+                        # Eğer inst bir CompiledInstruction ise ve SystemProgram transferi ise (daha düşük seviye)
+                        elif isinstance(inst, CompiledInstruction) and inst.program_id_index == 0: # System Program
+                             # Data'yı decode etmeniz gerekebilir, bu daha karmaşık bir senaryo.
+                             # Şu an için parsed instruction'lara odaklanalım.
+                            pass
+                    if transferred > 0:
+                        break # Transfer bulunduysa döngüyü kır
+
             # Küçük bir toleransla karşılaştırma yap
             if sender == wallet_address and transferred >= (expected_sol - 0.000000001): # SOL için küçük bir fark
                 logger.info(f"Payment verified: {transferred} SOL from {sender}")
@@ -200,24 +220,8 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
             )
             try:
-                # Kullanıcıyı gruba davet etme
-                # Telegram Bot API'sında doğrudan "invite_chat_member" diye bir metod yok.
-                # Genellikle kullanıcının gruba katılması için bir davet bağlantısı sağlanır
-                # veya admin haklarına sahip bir bot aracılığıyla eklenir.
-                # Burada direkt "invite_chat_member" çalışmayabilir, buna dikkat edin.
-                # En yaygın yöntem, davet linki göndermektir.
-                # await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu satır sorun çıkarabilir.
-                
-                # Alternatif olarak davet linki gönderilebilir (eğer grubunuzun davet linki varsa)
-                # invite_link = "YOUR_VIP_GROUP_INVITE_LINK" 
-                # await update.message.reply_text(f"🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀\nJoin here: {invite_link}")
-                
-                # Kullanıcıyı gruba eklemeye çalışmak yerine, grubun linkini göndermek daha güvenli olabilir
-                # veya admin yetkileriyle add_chat_member kullanmanız gerekebilir.
-                # add_chat_member sadece kullanıcı tarafından başlatılan konuşma sonrasında çalışır.
-                # Botun admin olduğu bir grupta kullanıcıyı direkt eklemek için
-                # Botun "Can add members" yetkisi olmalı.
-                await context.bot.add_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu methodu deneyelim
+                # Botun "Can add members" yetkisi olduğundan emin olun
+                await context.bot.add_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) 
                 
                 await update.message.reply_text(
                     "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
@@ -244,8 +248,6 @@ async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
 
     for user_id in expired_users:
         try:
-            # Kullanıcıyı gruptan atmak ve sonra unban yaparak yeniden katılmasını engellemek
-            # veya sadece atmak (banlayıp unban yapmak gruptan çıkarır)
             await context.bot.ban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
             await context.bot.unban_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) # Bu, kullanıcının tekrar katılmasını engeller
             del user_membership[user_id]
@@ -288,7 +290,6 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_button, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_payment$"))
-    # Mesajın bir Solana cüzdan adresi olup olmadığını kontrol eden Regex filtresi
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(WALLET_ADDRESS_REGEX), handle_wallet))
     application.add_handler(CommandHandler("support", support))
     application.add_error_handler(error_handler)
@@ -299,7 +300,7 @@ def main():
     # Start bot
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
-        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com') # Varsayılan hostname'i güncelledim
+        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com') 
         webhook_url = f"https://{hostname}/webhook"
         logger.info(f"Setting webhook to {webhook_url} on port {port}")
         try:
