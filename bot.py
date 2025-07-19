@@ -49,6 +49,7 @@ PRICE_OPTIONS = {
 
 # Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /start from user {update.effective_user.id}")
     keyboard = [
         [InlineKeyboardButton("💳 3-Day Trial - 0.1 SOL", callback_data="buy_trial")],
         [InlineKeyboardButton("📆 Weekly Pass - 0.3 SOL", callback_data="buy_weekly")],
@@ -67,6 +68,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    logger.info(f"Button clicked by user {query.from_user.id}: {query.data}")
 
     choice = query.data.replace("buy_", "")
     user_id = query.from_user.id
@@ -85,6 +87,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+    logger.info(f"Confirm payment clicked by user {update.callback_query.from_user.id}")
     await update.callback_query.message.reply_text(
         "📤 Please provide the wallet address you used to send the payment:"
     )
@@ -96,20 +99,20 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
             limit=5,
             commitment=Confirmed
         ).value
+        logger.info(f"Fetched {len(signatures)} signatures for wallet {WALLET_ADDRESS}")
 
         for sig in signatures:
             tx = solana_client.get_transaction(
                 sig.signature,
                 encoding="jsonParsed",
-                max_supported_transaction_version=0  # Hata düzeltmesi
+                max_supported_transaction_version=0
             ).value
             
             if not tx:
+                logger.warning(f"No transaction data for signature {sig.signature}")
                 continue
 
-            # Gönderici adresini kontrol et
             sender = str(tx.transaction.message.account_keys[0])
-            # Transfer miktarını hesapla (SOL cinsinden)
             transferred = abs(tx.meta.post_balances[0] - tx.meta.pre_balances[0]) / 1e9
             
             if sender == wallet_address and transferred >= expected_sol:
@@ -128,6 +131,7 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.message.from_user.id
     wallet_address = update.message.text.strip()
+    logger.info(f"Received wallet address {wallet_address} from user {user_id}")
 
     if not re.match(WALLET_ADDRESS_REGEX, wallet_address):
         await update.message.reply_text("⚠️ Please enter a valid Solana wallet address.")
@@ -144,7 +148,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Verifying your payment... (This may take up to 5 minutes)")
 
-    # Ödeme doğrulaması (4 kez, 75 saniye aralıklarla)
     for _ in range(4):
         if await verify_payment(wallet_address, price):
             user_membership[user_id] = {"plan": plan, "expires": expire_time}
@@ -153,10 +156,16 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=VIP_CHAT_ID,
                 text=f"✅ New VIP Member: @{update.effective_user.username} ({plan})"
             )
-            await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
-            await update.message.reply_text(
-                "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
-            )
+            try:
+                await context.bot.invite_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id)
+                await update.message.reply_text(
+                    "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
+                )
+            except Exception as e:
+                logger.error(f"Failed to invite user {user_id} to VIP group: {e}")
+                await update.message.reply_text(
+                    "✅ Payment confirmed, but failed to add you to the VIP group. Please contact support with /support."
+                )
             return
         await asyncio.sleep(75)
 
@@ -189,12 +198,21 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.reply_text("⚠️ An error occurred. Please try again or contact support with /support.")
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Support command from user {update.effective_user.id}")
     await update.message.reply_text(
         "Having trouble with your payment? 💸 Please share your wallet address and details, "
         "and our team will assist you promptly! 🚀"
     )
 
 def main():
+    logger.info("Starting bot...")
+    if not TOKEN:
+        logger.error("BOT_TOKEN is not set in environment variables")
+        raise ValueError("BOT_TOKEN is missing")
+    if not HELIUS_API_KEY:
+        logger.error("HELIUS_API_KEY is not set in environment variables")
+        raise ValueError("HELIUS_API_KEY is missing")
+    
     application = ApplicationBuilder().token(TOKEN).build()
 
     # Handlers
@@ -211,17 +229,33 @@ def main():
     # Start bot
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
-        webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
-        application.bot.delete_webhook(drop_pending_updates=True)
-        print(f"Starting webhook on {webhook_url}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            webhook_url=webhook_url
-        )
+        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com')
+        webhook_url = f"https://{hostname}/webhook"
+        logger.info(f"Setting webhook to {webhook_url} on port {port}")
+        try:
+            application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Deleted existing webhook")
+            application.bot.set_webhook(url=webhook_url)
+            logger.info("Webhook set successfully")
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path="/webhook",
+                webhook_url=webhook_url
+            )
+            logger.info("Webhook started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start webhook: {str(e)}")
+            raise
     else:
-        print("Starting polling mode")
-        application.run_polling()
+        logger.info("Starting polling mode")
+        try:
+            application.run_polling()
+        except Exception as e:
+            logger.error(f"Failed to start polling: {str(e)}")
+            raise
+
+    logger.info("Bot is running")
 
 if __name__ == "__main__":
     main()
