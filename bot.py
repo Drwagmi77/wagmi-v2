@@ -17,6 +17,7 @@ from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
 from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction
 from solders.instruction import CompiledInstruction 
+import json # JSON modülünü buraya import ettik
 
 # --- Config ---
 TOKEN = os.getenv("BOT_TOKEN")
@@ -134,14 +135,26 @@ async def verify_payment(wallet_address: str, expected_sol: float, tx_id: str = 
                 
                 logger.info(f"Processing signature: {sig_str}")
 
+                if tx_response and tx_response.value:
+                    # transaction_data'yı doğrudan loglamak yerine JSON'a dönüştürerek daha okunaklı yapalım.
+                    try:
+                        tx_data_json = json.dumps(tx_response.value.to_json(), indent=2)
+                        logger.info(f"Full transaction data for {sig_str}:\n{tx_data_json}")
+                    except Exception as json_err:
+                        logger.error(f"Could not convert transaction data to JSON for {sig_str}: {json_err}")
+                        logger.info(f"Raw tx_response.value for {sig_str}: {tx_response.value}") 
+                else:
+                    logger.warning(f"No transaction response value for signature {sig_str}")
+
+
                 if not tx_response or not tx_response.value:
-                    logger.warning(f"No transaction data (or value is None) for signature {sig_str}")
+                    logger.warning(f"No transaction data (or value is None) for signature {sig_str}. Skipping.")
                     continue
                 
                 transaction_data = tx_response.value 
 
                 if not hasattr(transaction_data, 'meta') or transaction_data.meta is None:
-                    logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig_str}")
+                    logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig_str}. Skipping.")
                     continue
                 
                 meta = transaction_data.meta
