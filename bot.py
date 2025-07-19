@@ -15,16 +15,19 @@ from telegram.ext import (
 from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from solana.rpc.commitment import Confirmed
-# Solders kütüphanesinden gerekli sınıfları import edelim
 from solders.transaction_status import EncodedTransactionWithStatusMeta, UiTransactionEncoding, ParsedInstruction
 from solders.instruction import CompiledInstruction 
 
-# Config
+# --- Config ---
 TOKEN = os.getenv("BOT_TOKEN")
 VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID"))
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 WALLET_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{42,44}$"
+TRANSACTION_ID_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{87,88}$" # Solana işlem ID'si (signature) regex'i
+
+# Ödeme Toleransı: Kabul edilebilir minimum düşüş yüzdesi (örneğin 0.05 = %5)
+PAYMENT_TOLERANCE_PERCENT = 0.05 
 
 # Initialize Solana Client
 solana_client = Client(
@@ -75,15 +78,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     choice = query.data.replace("buy_", "")
     user_id = query.from_user.id
-    user_states[user_id] = {"plan": choice}
+    user_states[user_id] = {"plan": choice, "awaiting_input": "wallet_or_txid"} 
 
     price = PRICE_OPTIONS[choice]["price"]
 
     await query.message.reply_text(
         f"💸 Send exactly *{price} SOL* to:\n\n`{WALLET_ADDRESS}`\n\n"
-        "Once you've made the payment, click below to confirm! 👇",
+        "Once you've made the payment, please send **the wallet address you used to send the payment** OR **the transaction ID (signature)** here. 👇",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Payment Sent", callback_data="confirm_payment")]
+            [InlineKeyboardButton("✅ Payment Sent (Old Method)", callback_data="confirm_payment")] 
         ]),
         parse_mode="Markdown"
     )
@@ -91,81 +94,111 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     logger.info(f"Confirm payment clicked by user {update.callback_query.from_user.id}")
+    user_id = update.callback_query.from_user.id
+    user_states[user_id] = user_states.get(user_id, {}) 
+    user_states[user_id]["awaiting_input"] = "wallet_or_txid" 
     await update.callback_query.message.reply_text(
-        "📤 Please provide the wallet address you used to send the payment:"
+        "📤 Please provide the wallet address you used to send the payment (or the transaction ID):"
     )
 
-async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
+async def verify_payment(wallet_address: str, expected_sol: float, tx_id: str = None) -> bool:
     try:
-        signatures = solana_client.get_signatures_for_address(
-            Pubkey.from_string(WALLET_ADDRESS),
-            limit=5,
-            commitment=Confirmed
-        ).value
-        logger.info(f"Fetched {len(signatures)} signatures for wallet {WALLET_ADDRESS}")
+        signatures_to_check = []
 
-        for sig in signatures:
-            tx_response = solana_client.get_transaction(
-                sig.signature,
-                encoding="jsonParsed", # BURADA DİREKT STRING KULLANILDI!
-                max_supported_transaction_version=0
-            )
+        if tx_id: 
+            logger.info(f"Direct transaction ID provided: {tx_id}")
+            signatures_to_check.append(Pubkey.from_string(tx_id))
+        else: 
+            signatures_res = solana_client.get_signatures_for_address(
+                Pubkey.from_string(WALLET_ADDRESS),
+                limit=20, 
+                commitment=Confirmed
+            ).value
+            if signatures_res:
+                signatures_to_check = [sig.signature for sig in signatures_res]
+            logger.info(f"Fetched {len(signatures_to_check)} signatures for wallet {WALLET_ADDRESS}")
+
+        if not signatures_to_check:
+            logger.warning("No signatures to check.")
+            return False
+
+        for sig_pubkey in signatures_to_check:
+            sig_str = str(sig_pubkey) 
             
-            if not tx_response or not tx_response.value:
-                logger.warning(f"No transaction data (or value is None) for signature {sig.signature}")
-                continue
-            
-            transaction_data = tx_response.value 
-
-            if not hasattr(transaction_data, 'meta') or transaction_data.meta is None:
-                logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig.signature}")
-                continue
-            
-            meta = transaction_data.meta
-
-            if not hasattr(transaction_data, 'transaction') or transaction_data.transaction is None:
-                logger.warning(f"Transaction data has no 'transaction' attribute or 'transaction' is None for signature {sig.signature}")
-                continue
-
-            transaction = transaction_data.transaction
-
-            if not hasattr(transaction, 'message') or not hasattr(transaction.message, 'account_keys'):
-                logger.warning(f"Transaction or message/account_keys not found for signature {sig.signature}")
-                continue
-
-            sender = str(transaction.message.account_keys[0].pubkey) 
-            
-            transferred = 0.0
-            
-            if meta.post_balances and meta.pre_balances and len(meta.post_balances) > 0 and len(meta.pre_balances) > 0:
-                receiver_index = -1
-                for i, key in enumerate(transaction.message.account_keys):
-                    if str(key.pubkey) == WALLET_ADDRESS:
-                        receiver_index = i
-                        break
+            try:
+                tx_response = solana_client.get_transaction(
+                    sig_pubkey, 
+                    encoding="jsonParsed",
+                    max_supported_transaction_version=0
+                )
                 
-                if receiver_index != -1 and receiver_index < len(meta.post_balances) and receiver_index < len(meta.pre_balances):
-                    balance_change = meta.post_balances[receiver_index] - meta.pre_balances[receiver_index]
-                    if balance_change > 0:
-                        transferred = balance_change / 1e9
+                logger.info(f"Processing signature: {sig_str}")
 
-            if transferred == 0 and meta.inner_instructions:
-                for inner_inst in meta.inner_instructions:
-                    for inst in inner_inst.instructions:
-                        if isinstance(inst, ParsedInstruction) and inst.parsed and inst.parsed['type'] == 'transfer':
-                            info = inst.parsed['info']
-                            if info['source'] == wallet_address and info['destination'] == WALLET_ADDRESS:
-                                transferred_lamports = info['lamports']
-                                transferred = transferred_lamports / 1e9
-                                break
-                        elif isinstance(inst, CompiledInstruction) and inst.program_id_index == 0:
-                            pass
-                    if transferred > 0:
-                        break
+                if not tx_response or not tx_response.value:
+                    logger.warning(f"No transaction data (or value is None) for signature {sig_str}")
+                    continue
+                
+                transaction_data = tx_response.value 
 
-            if sender == wallet_address and transferred >= (expected_sol - 0.000000001):
-                logger.info(f"Payment verified: {transferred} SOL from {sender}")
-                return True
+                if not hasattr(transaction_data, 'meta') or transaction_data.meta is None:
+                    logger.warning(f"Transaction data has no 'meta' attribute or 'meta' is None for signature {sig_str}")
+                    continue
+                
+                meta = transaction_data.meta
+                
+                if meta.err:
+                    logger.warning(f"Transaction {sig_str} failed with error: {meta.err}")
+                    continue 
+
+                if not hasattr(transaction_data, 'transaction') or transaction_data.transaction is None:
+                    logger.warning(f"Transaction data has no 'transaction' attribute or 'transaction' is None for signature {sig_str}")
+                    continue
+
+                transaction = transaction_data.transaction
+
+                if not hasattr(transaction, 'message') or not hasattr(transaction.message, 'account_keys'):
+                    logger.warning(f"Transaction or message/account_keys not found for signature {sig_str}")
+                    continue
+
+                sender = str(transaction.message.account_keys[0].pubkey) 
+                
+                transferred = 0.0
+                
+                if meta.post_balances and meta.pre_balances and len(meta.post_balances) > 0 and len(meta.pre_balances) > 0:
+                    receiver_index = -1
+                    for i, key in enumerate(transaction.message.account_keys):
+                        if str(key.pubkey) == WALLET_ADDRESS:
+                            receiver_index = i
+                            break
+                    
+                    if receiver_index != -1 and receiver_index < len(meta.post_balances) and receiver_index < len(meta.pre_balances):
+                        balance_change = meta.post_balances[receiver_index] - meta.pre_balances[receiver_index]
+                        if balance_change > 0:
+                            transferred = balance_change / 1e9
+
+                if transferred == 0 and meta.inner_instructions:
+                    for inner_inst in meta.inner_instructions:
+                        for inst in inner_inst.instructions:
+                            if isinstance(inst, ParsedInstruction) and inst.parsed and inst.parsed['type'] == 'transfer':
+                                info = inst.parsed['info']
+                                if info['source'] == wallet_address and info['destination'] == WALLET_ADDRESS:
+                                    transferred_lamports = info['lamports']
+                                    transferred = transferred_lamports / 1e9
+                                    break
+                            elif isinstance(inst, CompiledInstruction) and inst.program_id_index == 0:
+                                pass
+
+                        if transferred > 0:
+                            break
+
+                # Ödeme kontrolü: Yüzde 5'lik tolerans ile (expected_sol * 0.95)
+                if (tx_id or sender == wallet_address) and transferred >= (expected_sol * (1 - PAYMENT_TOLERANCE_PERCENT)): 
+                    logger.info(f"Payment verified: {transferred} SOL from {sender} for signature {sig_str} with {PAYMENT_TOLERANCE_PERCENT*100}% tolerance.")
+                    return True
+            
+            except Exception as e:
+                logger.error(f"Error processing single transaction {sig_str}: {e}")
+                continue
                 
     except Exception as e:
         logger.error(f"Payment verification failed: {e}")
@@ -178,14 +211,10 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.message.from_user.id
-    wallet_address = update.message.text.strip()
-    logger.info(f"Received wallet address {wallet_address} from user {user_id}")
+    user_input = update.message.text.strip()
+    logger.info(f"Received input '{user_input}' from user {user_id}")
 
-    if not re.match(WALLET_ADDRESS_REGEX, wallet_address):
-        await update.message.reply_text("⚠️ Please enter a valid Solana wallet address.")
-        return
-
-    if user_id not in user_states or "plan" not in user_states[user_id]:
+    if user_id not in user_states or "plan" not in user_states[user_id] or user_states[user_id].get("awaiting_input") != "wallet_or_txid":
         await update.message.reply_text("⚠️ Please select a subscription plan first using /start.")
         return
 
@@ -194,10 +223,25 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = PRICE_OPTIONS[plan]["duration"]
     expire_time = None if duration is None else datetime.utcnow() + duration
 
-    await update.message.reply_text("🔍 Verifying your payment... (This may take up to 5 minutes)")
+    is_wallet_address = re.match(WALLET_ADDRESS_REGEX, user_input)
+    is_transaction_id = re.match(TRANSACTION_ID_REGEX, user_input)
 
-    for _ in range(4):
-        if await verify_payment(wallet_address, price):
+    wallet_address_for_check = None
+    transaction_id_for_check = None
+
+    if is_wallet_address:
+        wallet_address_for_check = user_input
+        await update.message.reply_text("🔍 Verifying your payment using wallet address... (This may take up to 5 minutes)")
+    elif is_transaction_id:
+        transaction_id_for_check = user_input
+        await update.message.reply_text("🔍 Verifying your payment using transaction ID... (This may take up to 5 minutes)")
+    else:
+        await update.message.reply_text("⚠️ Please enter a valid Solana wallet address OR a valid transaction ID.")
+        return
+
+    for attempt in range(4): 
+        logger.info(f"Attempt {attempt + 1} for user {user_id}, wallet: {wallet_address_for_check}, tx_id: {transaction_id_for_check}")
+        if await verify_payment(wallet_address_for_check, price, transaction_id_for_check):
             user_membership[user_id] = {"plan": plan, "expires": expire_time}
             logger.info(f"Payment verified: User {user_id}, plan {plan}, amount {price} SOL")
             await context.bot.send_message(
@@ -206,7 +250,6 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             try:
                 await context.bot.add_chat_member(chat_id=VIP_CHAT_ID, user_id=user_id) 
-                
                 await update.message.reply_text(
                     "🎉 Payment confirmed! Welcome to the WAGMI VIP Signal Group! 🚀"
                 )
@@ -215,13 +258,22 @@ async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "✅ Payment confirmed, but failed to add you to the VIP group. Please contact support with /support."
                 )
+            user_states[user_id]["awaiting_input"] = None
             return
+        
+        if transaction_id_for_check and attempt < 3:
+            await update.message.reply_text(f"⏳ Payment not yet confirmed for transaction ID. Retrying in a moment... (Attempt {attempt + 1}/4)")
+        elif not transaction_id_for_check and attempt < 3:
+            await update.message.reply_text(f"⏳ Payment not found from wallet. Retrying in a moment... (Attempt {attempt + 1}/4)")
+
         await asyncio.sleep(75)
 
     await update.message.reply_text(
-        f"❌ No payment of {price} SOL found from {wallet_address} to {WALLET_ADDRESS}. "
+        f"❌ No payment of {price} SOL found from {user_input}. "
         "Please check your transaction and try again or use /support."
     )
+    user_states[user_id]["awaiting_input"] = None
+
 
 async def remove_expired_members(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.utcnow()
@@ -270,18 +322,15 @@ def main():
     
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(handle_button, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(confirm_payment, pattern="^confirm_payment$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(WALLET_ADDRESS_REGEX), handle_wallet))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.Regex(WALLET_ADDRESS_REGEX) | filters.Regex(TRANSACTION_ID_REGEX)), handle_wallet))
     application.add_handler(CommandHandler("support", support))
     application.add_error_handler(error_handler)
 
-    # Job Queue
     application.job_queue.run_repeating(remove_expired_members, interval=300, first=10)
 
-    # Start bot
     if 'RENDER' in os.environ:
         port = int(os.environ.get('PORT', 443))
         hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME', 'wagmi-v2.onrender.com') 
