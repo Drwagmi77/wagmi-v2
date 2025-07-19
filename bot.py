@@ -18,9 +18,9 @@ from solana.rpc.commitment import Confirmed
 
 # Config
 TOKEN = os.getenv("BOT_TOKEN")
-VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID", "-1002701984074"))
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "Fify9uEQ98CgQ6T3NeNUCQC7qvEAUmnhrsRmzKm3n4Gf")
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "7930dbab-e806-4f3f-bf3b-716a14c6e3c3")
+VIP_CHAT_ID = int(os.getenv("VIP_CHAT_ID"))
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 WALLET_ADDRESS_REGEX = r"^[1-9A-HJ-NP-Za-km-z]{42,44}$"
 
 # Initialize Solana Client
@@ -112,7 +112,9 @@ async def verify_payment(wallet_address: str, expected_sol: float) -> bool:
                 logger.warning(f"No transaction data for signature {sig.signature}")
                 continue
 
-            sender = str(tx.transaction.message.account_keys[0])
+            # Gönderici adresini doğru şekilde al
+            sender = str(tx.transaction.transaction.message.account_keys[0])
+            # Transfer miktarını hesapla (SOL cinsinden)
             transferred = abs(tx.meta.post_balances[0] - tx.meta.pre_balances[0]) / 1e9
             
             if sender == wallet_address and transferred >= expected_sol:
@@ -212,6 +214,12 @@ def main():
     if not HELIUS_API_KEY:
         logger.error("HELIUS_API_KEY is not set in environment variables")
         raise ValueError("HELIUS_API_KEY is missing")
+    if not WALLET_ADDRESS:
+        logger.error("WALLET_ADDRESS is not set in environment variables")
+        raise ValueError("WALLET_ADDRESS is missing")
+    if not VIP_CHAT_ID:
+        logger.error("VIP_CHAT_ID is not set in environment variables")
+        raise ValueError("VIP_CHAT_ID is missing")
     
     application = ApplicationBuilder().token(TOKEN).build()
 
